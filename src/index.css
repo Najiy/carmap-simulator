@@ -1,0 +1,82 @@
+@import "tailwindcss";
+
+@theme {
+  /* dark tuner palette (validated dataviz reference, dark mode) */
+  --color-page: #0d0d0d;
+  --color-surface: #1a1a19;
+  --color-raised: #222220;
+  --color-ink: #ffffff;
+  --color-ink2: #c3c2b7;
+  --color-muted: #898781;
+  --color-grid: #2c2c2a;
+  --color-axis: #383835;
+  --color-s1: #3987e5; /* series 1: torque / primary accent */
+  --color-s2: #199e70; /* series 2: power */
+  --color-s3: #c98500; /* series 3: AFR */
+  --color-good: #0ca30c;
+  --color-warn: #fab219;
+  --color-serious: #ec835a;
+  --color-crit: #d03b3b;
+
+  --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  background: var(--color-page);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  overscroll-behavior: none;
+}
+
+/* slim dark scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #383835 transparent;
+}
+
+/* range inputs — tuner style */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 22px;
+  background: transparent;
+  cursor: pointer;
+  width: 100%;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+  background: #2c2c2a;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  margin-top: -5px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #c3c2b7;
+  border: 2px solid #0d0d0d;
+}
+input[type="range"]:hover::-webkit-slider-thumb {
+  background: #ffffff;
+}
+input[type="range"]::-moz-range-track {
+  height: 6px;
+  border-radius: 3px;
+  background: #2c2c2a;
+}
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #c3c2b7;
+  border: 2px solid #0d0d0d;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
