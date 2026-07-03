@@ -14,6 +14,7 @@ import {
   createRaceCar,
   QUARTER_MILE_M,
   RACE_STEP,
+  RACE_TIMEOUT,
   simulateGhost,
   STAGE_S,
   stepRaceCar,
@@ -27,6 +28,7 @@ import {
   friendlyDbError,
   MAX_PLAYERS,
   RaceRoom,
+  type LobbyEntry,
   type RaceResult,
   type RoomSnapshot,
 } from "../multiplayer/room";
@@ -129,7 +131,6 @@ export default function RacePanel({
 }) {
   const snap = useEngineSnapshot();
   const playerName = useGameStore((s) => s.playerName);
-  const setPlayerName = useGameStore((s) => s.setPlayerName);
   const autoShift = useGameStore((s) => s.autoShift);
   const setAutoShift = useGameStore((s) => s.setAutoShift);
   const bestEt = useGameStore((s) => s.bestEt[spec.id]);
@@ -144,6 +145,9 @@ export default function RacePanel({
   );
   const [mpError, setMpError] = useState<string | null>(null);
   const [joinCode, setJoinCode] = useState("");
+  const [joinPass, setJoinPass] = useState("");
+  const [hostPass, setHostPass] = useState("");
+  const [lobbyList, setLobbyList] = useState<LobbyEntry[]>([]);
   const [busy, setBusy] = useState(false);
 
   const envRef = useRef<RaceEnv | null>(null);
@@ -269,7 +273,7 @@ export default function RacePanel({
     const s = room.current;
     if (s?.status === "racing" && s.greenAt !== null) {
       const raceClock = (room.serverNow() - s.greenAt) / 1000;
-      if (s.results[room.myId] || raceClock >= 35) {
+      if (s.results[room.myId] || raceClock >= RACE_TIMEOUT) {
         setOutcome({ kind: "mp" });
         setPhase("done");
       } else {
@@ -290,6 +294,10 @@ export default function RacePanel({
     if (phase !== "lobby" || !room) return;
     const mine = roomSnap?.players[room.myId];
     if (!mine) return;
+    // renaming yourself in the header syncs to the lobby card too
+    if (mine.name !== playerName) {
+      room.setName(playerName).catch(() => {});
+    }
     const hp = Math.round(myDyno.peakHp.v);
     if (
       mine.engineId === spec.id &&
@@ -307,14 +315,14 @@ export default function RacePanel({
         maps: structuredClone(maps),
       })
       .catch(() => {});
-  }, [phase, roomSnap, spec, snap.wastegateKpa, myDyno, maps]);
+  }, [phase, roomSnap, spec, snap.wastegateKpa, myDyno, maps, playerName]);
 
   const hostRace = useCallback(async () => {
     if (snap.blown || busy) return;
     setBusy(true);
     setMpError(null);
     try {
-      const room = await RaceRoom.host(myMeta());
+      const room = await RaceRoom.host(myMeta(), { pass: hostPass });
       attachRoom(room);
       setPhase("lobby");
     } catch (e) {
@@ -322,7 +330,7 @@ export default function RacePanel({
     } finally {
       setBusy(false);
     }
-  }, [snap.blown, busy, myMeta, attachRoom]);
+  }, [snap.blown, busy, myMeta, attachRoom, hostPass]);
 
   const joinRace = useCallback(
     async (codeArg?: string) => {
@@ -331,7 +339,7 @@ export default function RacePanel({
       setBusy(true);
       setMpError(null);
       try {
-        const room = await RaceRoom.join(code, myMeta());
+        const room = await RaceRoom.join(code, myMeta(), joinPass);
         attachRoom(room);
         setPhase("lobby");
       } catch (e) {
@@ -340,7 +348,7 @@ export default function RacePanel({
         setBusy(false);
       }
     },
-    [snap.blown, busy, joinCode, myMeta, attachRoom],
+    [snap.blown, busy, joinCode, joinPass, myMeta, attachRoom],
   );
 
   // arriving via an invite link: prefill, scrub the URL, join once — the
@@ -367,6 +375,12 @@ export default function RacePanel({
     setHud(null);
     setOutcome(null);
   }, []);
+
+  // the "open races" browser is live while you're on the setup screen
+  useEffect(() => {
+    if (phase !== "setup") return;
+    return RaceRoom.watchLobby(setLobbyList);
+  }, [phase]);
 
   // ---- the race runner -----------------------------------------------------
   useEffect(() => {
@@ -402,6 +416,7 @@ export default function RacePanel({
             shiftQueueRef.current = 0;
           } else if (
             autoShiftRef.current &&
+            !roomRef.current && // auto-shift is a solo assist — multiplayer is manual
             car.gear >= 0 && // never auto-engage first from neutral at speed
             car.rpm >= env.shiftRpm &&
             car.gear < GEARBOX.ratios.length - 1
@@ -476,7 +491,7 @@ export default function RacePanel({
 
       setHud({ ...car });
 
-      const meDone = car.finished || (car.blown && car.v < 1) || car.t > 35;
+      const meDone = car.finished || (car.blown && car.v < 1) || car.t > RACE_TIMEOUT;
       let oppDone: boolean;
       if (room) {
         const s = roomSnapRef.current;
@@ -487,7 +502,7 @@ export default function RacePanel({
         // a result — drivers who disconnect drop out of players automatically
         oppDone =
           oppIds.length === 0 ||
-          car.t > 35 ||
+          car.t > RACE_TIMEOUT ||
           oppIds.every((pid) => {
             if (s?.results[pid]) return true;
             const l = s?.live[pid];
@@ -639,12 +654,15 @@ export default function RacePanel({
           aiLevel={aiLevel}
           setAiLevel={setAiLevel}
           onStage={stageSolo}
-          playerName={playerName}
-          setPlayerName={setPlayerName}
           onHost={hostRace}
+          hostPass={hostPass}
+          setHostPass={setHostPass}
           joinCode={joinCode}
           setJoinCode={setJoinCode}
+          joinPass={joinPass}
+          setJoinPass={setJoinPass}
           onJoin={joinRace}
+          lobbyList={lobbyList}
           busy={busy}
           mpError={mpError}
           autoShift={autoShift}
@@ -677,7 +695,8 @@ export default function RacePanel({
             <RaceHud
               car={hud}
               env={envRef.current!}
-              autoShift={autoShift}
+              autoShift={autoShift && !room}
+              allowAutoShift={!room}
               setAutoShift={setAutoShift}
               onThrottle={(v) => (throttleRef.current = v)}
               onShift={() => (shiftQueueRef.current = 1)}
@@ -718,12 +737,15 @@ function SetupView(p: {
   aiLevel: AiLevel;
   setAiLevel: (l: AiLevel) => void;
   onStage: () => void;
-  playerName: string;
-  setPlayerName: (n: string) => void;
   onHost: () => void;
+  hostPass: string;
+  setHostPass: (v: string) => void;
   joinCode: string;
   setJoinCode: (c: string) => void;
-  onJoin: () => void;
+  joinPass: string;
+  setJoinPass: (v: string) => void;
+  onJoin: (code?: string) => void;
+  lobbyList: LobbyEntry[];
   busy: boolean;
   mpError: string | null;
   autoShift: boolean;
@@ -777,6 +799,17 @@ function SetupView(p: {
           <div className="text-xs text-muted">
             The rival drives the same {p.spec.name.split("—")[0].trim()} — only the tune differs.
           </div>
+          <label className="flex items-center gap-2 rounded border border-grid bg-raised/40 p-2 text-xs text-ink2">
+            <input
+              type="checkbox"
+              checked={p.autoShift}
+              onChange={(e) => p.setAutoShift(e.target.checked)}
+            />
+            <span>
+              <span className="font-semibold text-ink">Auto-shift</span> — the box
+              changes gears for you (solo only)
+            </span>
+          </label>
           <motion.button
             whileTap={{ scale: 0.97 }}
             onClick={p.onStage}
@@ -792,65 +825,148 @@ function SetupView(p: {
           <div className="text-xs font-semibold uppercase tracking-wider text-ink2">
             Multiplayer — race your friends (2–8 drivers)
           </div>
-          <label className="flex items-center gap-2 text-sm">
-            <span className="w-24 shrink-0 text-xs text-muted">Driver name</span>
-            <input
-              value={p.playerName}
-              onChange={(e) => p.setPlayerName(e.target.value)}
-              maxLength={20}
-              className="w-full rounded border border-grid bg-raised px-2 py-1.5 text-sm"
-            />
-          </label>
-          <motion.button
-            whileTap={{ scale: 0.97 }}
-            onClick={p.onHost}
-            disabled={p.blown || p.busy}
-            className="rounded bg-s2 px-4 py-2.5 text-sm font-bold text-white disabled:opacity-40"
-          >
-            {p.busy ? "…" : "Host a race — get a code"}
-          </motion.button>
-          <div className="flex items-center gap-2">
-            <input
-              value={p.joinCode}
-              onChange={(e) => p.setJoinCode(extractJoinCode(e.target.value))}
-              onKeyDown={(e) => e.key === "Enter" && p.onJoin()}
-              placeholder="CODE"
-              title="Paste a code or a whole invite link"
-              className="w-28 rounded border border-grid bg-raised px-2 py-1.5 text-center font-mono text-base font-bold tracking-[0.3em]"
-            />
-            <motion.button
-              whileTap={{ scale: 0.97 }}
-              onClick={p.onJoin}
-              disabled={p.blown || p.busy || p.joinCode.trim().length < 4}
-              className="rounded border border-s2 px-4 py-2 text-sm font-bold text-s2 disabled:opacity-40"
-            >
-              Join with code
-            </motion.button>
+
+          {/* host */}
+          <div className="flex flex-col gap-2 rounded border border-grid bg-raised/40 p-3">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-s2">
+              Host a race
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                value={p.hostPass}
+                onChange={(e) => p.setHostPass(e.target.value)}
+                placeholder="Password (optional)"
+                maxLength={24}
+                title="Set a password to keep randoms out of your race"
+                className="min-w-0 flex-1 rounded border border-grid bg-raised px-2 py-1.5 text-sm"
+              />
+              <motion.button
+                whileTap={{ scale: 0.97 }}
+                onClick={p.onHost}
+                disabled={p.blown || p.busy}
+                className="shrink-0 rounded bg-s2 px-4 py-2 text-sm font-bold text-white disabled:opacity-40"
+              >
+                {p.busy ? "…" : `Host${p.hostPass.trim() ? " 🔒" : ""}`}
+              </motion.button>
+            </div>
+            <div className="text-[11px] text-muted">
+              You get a room code and an invite link to share. A password locks the room.
+            </div>
           </div>
+
+          {/* join */}
+          <div className="flex flex-col gap-2 rounded border border-grid bg-raised/40 p-3">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-s1">
+              Join a race
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                value={p.joinCode}
+                onChange={(e) => p.setJoinCode(extractJoinCode(e.target.value))}
+                onKeyDown={(e) => e.key === "Enter" && p.onJoin()}
+                placeholder="CODE"
+                title="Paste a code or a whole invite link"
+                className="w-24 shrink-0 rounded border border-grid bg-raised px-2 py-1.5 text-center font-mono text-base font-bold tracking-[0.3em]"
+              />
+              <input
+                value={p.joinPass}
+                onChange={(e) => p.setJoinPass(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && p.onJoin()}
+                placeholder="Password"
+                maxLength={24}
+                title="Only needed for locked races"
+                className="min-w-0 flex-1 rounded border border-grid bg-raised px-2 py-1.5 text-sm"
+              />
+              <motion.button
+                whileTap={{ scale: 0.97 }}
+                onClick={() => p.onJoin()}
+                disabled={p.blown || p.busy || p.joinCode.trim().length < 4}
+                className="shrink-0 rounded border border-s1 px-4 py-2 text-sm font-bold text-s1 disabled:opacity-40"
+              >
+                Join
+              </motion.button>
+            </div>
+            <div className="text-[11px] text-muted">
+              Paste a code or a whole invite link — the password is only needed for 🔒 rooms.
+            </div>
+          </div>
+
           {p.mpError && (
             <div className="rounded border border-warn bg-warn/10 p-2 text-xs text-warn">
               {p.mpError}
             </div>
           )}
           <div className="mt-auto text-xs text-muted">
-            Up to {MAX_PLAYERS} drivers per room. Paste a code or a whole invite link above.
             You can keep tuning in the lobby — your loadout locks at the green light.
           </div>
         </div>
       </div>
 
-      <label className="flex items-center gap-2 text-xs text-ink2">
-        <input
-          type="checkbox"
-          checked={p.autoShift}
-          onChange={(e) => p.setAutoShift(e.target.checked)}
-        />
-        Auto-shift (otherwise: hold <kbd className="rounded border border-grid px-1">Space</kbd>{" "}
-        = throttle, <kbd className="rounded border border-grid px-1">E</kbd> /{" "}
+      {/* open races browser */}
+      <div className="flex flex-col gap-2 rounded border border-grid bg-surface p-4">
+        <div className="flex items-baseline gap-2">
+          <div className="text-xs font-semibold uppercase tracking-wider text-ink2">
+            Open races
+          </div>
+          <span className="text-[11px] text-muted">
+            live — pick one and jump in ({p.lobbyList.length})
+          </span>
+        </div>
+        {p.lobbyList.length === 0 ? (
+          <div className="rounded border border-dashed border-grid p-3 text-center text-xs text-muted">
+            Nobody's hosting right now — start one and share the code.
+          </div>
+        ) : (
+          <div className="flex flex-col gap-1">
+            {p.lobbyList.map((e) => {
+              const joinable = e.status === "lobby" && e.players < MAX_PLAYERS;
+              return (
+                <div
+                  key={e.code}
+                  className="flex items-center gap-3 rounded border border-grid bg-raised px-3 py-2 text-sm"
+                >
+                  <span className="font-mono text-xs font-bold tracking-[0.2em] text-s1">
+                    {e.code}
+                  </span>
+                  <span className="truncate font-semibold">{e.hostName}</span>
+                  <span className="hidden truncate text-xs text-ink2 sm:inline">
+                    {e.engineName.split("—")[0].trim()} · {e.peakHp} whp
+                  </span>
+                  <span className="ml-auto shrink-0 text-xs text-muted">
+                    {e.players}/{MAX_PLAYERS}
+                    {e.hasPass ? " · 🔒" : ""}
+                    {e.status === "racing" ? " · racing" : ""}
+                  </span>
+                  <button
+                    onClick={() => {
+                      p.setJoinCode(e.code);
+                      p.onJoin(e.code); // locked + no password → helpful error
+                    }}
+                    disabled={p.blown || p.busy || !joinable}
+                    title={
+                      e.hasPass
+                        ? "Locked — type the password in the field above, then click"
+                        : "Join this race"
+                    }
+                    className="shrink-0 rounded bg-s2 px-3 py-1 text-xs font-bold text-white disabled:opacity-30"
+                  >
+                    {e.hasPass ? "Join 🔒" : "Join"}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <div className="text-[11px] text-muted">
+        Controls: hold <kbd className="rounded border border-grid px-1">Space</kbd> = throttle,{" "}
+        <kbd className="rounded border border-grid px-1">E</kbd> /{" "}
         <kbd className="rounded border border-grid px-1">↑</kbd> = shift up,{" "}
         <kbd className="rounded border border-grid px-1">1–6</kbd> = grab a gear,{" "}
-        <kbd className="rounded border border-grid px-1">0</kbd> = neutral)
-      </label>
+        <kbd className="rounded border border-grid px-1">0</kbd> = neutral. Multiplayer is always
+        manual.
+      </div>
     </div>
   );
 }
@@ -1143,9 +1259,22 @@ function TrackView({
       </div>
       <div className="flex w-20 flex-col items-center justify-center rounded bg-page font-mono">
         <div className="text-[10px] uppercase text-muted">clock</div>
-        <div className="text-lg font-bold text-ink">
-          {t < 0 ? t.toFixed(1) : t.toFixed(2)}
+        <div
+          className={`text-lg font-bold ${
+            t >= RACE_TIMEOUT
+              ? "text-crit"
+              : t >= RACE_TIMEOUT - 5
+                ? "text-warn"
+                : "text-ink"
+          }`}
+        >
+          {t < 0
+            ? t.toFixed(1)
+            : Math.min(t, RACE_TIMEOUT).toFixed(2)}
         </div>
+        {t >= RACE_TIMEOUT && (
+          <div className="text-[9px] uppercase text-crit">time out</div>
+        )}
       </div>
     </div>
   );
@@ -1155,6 +1284,7 @@ function RaceHud({
   car,
   env,
   autoShift,
+  allowAutoShift,
   setAutoShift,
   onThrottle,
   onShift,
@@ -1162,6 +1292,8 @@ function RaceHud({
   car: RaceCar;
   env: RaceEnv;
   autoShift: boolean;
+  /** auto-shift is a solo assist — hidden entirely in multiplayer */
+  allowAutoShift: boolean;
   setAutoShift: (b: boolean) => void;
   onThrottle: (v: boolean) => void;
   onShift: () => void;
@@ -1230,7 +1362,11 @@ function RaceHud({
             />
           </div>
         </div>
-        <label className="flex items-center gap-1.5 text-xs text-ink2">
+        <label
+          className={`flex items-center gap-1.5 text-xs text-ink2 ${
+            allowAutoShift ? "" : "hidden"
+          }`}
+        >
           <input
             type="checkbox"
             checked={autoShift}
@@ -1403,24 +1539,18 @@ function ResultsView({
       <div className="mt-4 flex justify-center gap-3">
         {room ? (
           <>
-            {room.isHost ? (
-              <motion.button
-                whileTap={{ scale: 0.97 }}
-                onClick={onRematch}
-                className="rounded bg-s1 px-4 py-2 text-sm font-bold text-white"
-              >
-                ↻ Rematch
-              </motion.button>
-            ) : (
-              <span className="self-center text-xs text-muted">
-                waiting for the host to rematch…
-              </span>
-            )}
+            <motion.button
+              whileTap={{ scale: 0.97 }}
+              onClick={onRematch}
+              className="rounded bg-s1 px-4 py-2 text-sm font-bold text-white"
+            >
+              ↻ Back to lobby
+            </motion.button>
             <button
               onClick={onLeave}
               className="rounded border border-grid px-4 py-2 text-sm text-ink2 hover:text-ink"
             >
-              Leave
+              Leave room
             </button>
           </>
         ) : (
@@ -1434,7 +1564,8 @@ function ResultsView({
         )}
       </div>
       <div className="mt-2 text-center text-[11px] text-muted">
-        Knock and lean damage from the race carries over — check engine health before the next run.
+        Everyone stays in the room — “Back to lobby” regroups all drivers for another
+        round. Knock and lean damage carries over, so check your health first.
       </div>
     </motion.div>
   );

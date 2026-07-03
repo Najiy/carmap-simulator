@@ -28,14 +28,31 @@ const fail = (msg: string): never => {
 };
 
 console.log("1) host creates room…");
-const host = await RaceRoom.host(meta("HostBob"), "test-host-0001");
+const host = await RaceRoom.host(meta("HostBob"), {}, "test-host-0001");
 console.log("   code:", host.code);
 
+console.log("1b) room shows up in the public lobby list…");
+const lobbySeen = await new Promise<boolean>((resolve) => {
+  const timeout = setTimeout(() => {
+    stop();
+    resolve(false);
+  }, 8000);
+  const stop = RaceRoom.watchLobby((list) => {
+    if (list.some((e) => e.code === host.code && !e.hasPass)) {
+      clearTimeout(timeout);
+      stop();
+      resolve(true);
+    }
+  });
+});
+if (!lobbySeen) fail("hosted room never appeared in the lobby list");
+console.log("   listed, unlocked");
+
 console.log("2) guest joins…");
-const guest = await RaceRoom.join(host.code, meta("GuestAlice"), "test-guest-0002");
+const guest = await RaceRoom.join(host.code, meta("GuestAlice"), "", "test-guest-0002");
 
 console.log("2b) third racer joins (rooms hold up to 8)…");
-const third = await RaceRoom.join(host.code, meta("ThirdCarol"), "test-third-0003");
+const third = await RaceRoom.join(host.code, meta("ThirdCarol"), "", "test-third-0003");
 
 await wait(1200);
 const seenByHost = host.current;
@@ -100,14 +117,14 @@ const res = guest.current?.results ?? {};
 if (Object.keys(res).length !== 3) fail("guest doesn't see all 3 results");
 console.log("   all results visible:", Object.values(res).map((r: any) => r.et ?? "DNF").join(" / "));
 
-console.log("7) rematch resets…");
-await host.rematch();
+console.log("7) rematch resets (triggered by a NON-host guest)…");
+await guest.rematch();
 await wait(800);
-const after = guest.current;
+const after = host.current;
 if (after?.status !== "lobby" || Object.keys(after.results).length !== 0)
   fail("rematch didn't reset room");
 if (Object.values(after!.players).some((p) => p.ready)) fail("ready flags not cleared");
-console.log("   room back in lobby, ready flags cleared");
+console.log("   any driver can bring the room back to the lobby");
 
 console.log("8) guests leave, host sees departures…");
 await guest.leave();
@@ -119,6 +136,23 @@ console.log("   host sees empty slots");
 console.log("9) host leaves, room deleted…");
 await host.leave();
 await wait(500);
+
+console.log("10) password-locked rooms…");
+const pwHost = await RaceRoom.host(meta("LockBob"), { pass: "hunter2" }, "test-pw-host");
+let rejected = false;
+try {
+  await RaceRoom.join(pwHost.code, meta("Sneaky"), "wrong", "test-pw-bad");
+} catch (e) {
+  rejected = /password/i.test(String(e));
+}
+if (!rejected) fail("wrong password was accepted");
+console.log("   wrong password rejected");
+const pwGuest = await RaceRoom.join(pwHost.code, meta("Friend"), "hunter2", "test-pw-good");
+await wait(800);
+if (pwHost.opponentIds.length !== 1) fail("correct password join failed");
+console.log("   correct password accepted");
+await pwGuest.leave();
+await pwHost.leave();
 
 console.log("\nMP SMOKE OK");
 process.exit(0);

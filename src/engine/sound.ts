@@ -23,6 +23,8 @@ class EngineSound {
   private popBus!: DynamicsCompressorNode;
   /** short outdoor reverb — the open-air report that sells a real bang */
   private verb!: ConvolverNode;
+  /** the pipe resonator — metallic ring + flutter echo inside the tube */
+  private pipeIn!: GainNode;
   private lastPing = 0;
   private lastPop = 0;
   private lastCrackleT = 0;
@@ -140,6 +142,40 @@ class EngineSound {
     verbOut.gain.value = 0.9;
     this.verb.connect(verbOut);
     verbOut.connect(ctx.destination);
+
+    // the pipe: what makes a pop sound like it happened INSIDE a metal tube.
+    // A short comb with bandpassed feedback = the metallic ring of the pipe
+    // walls; a ~19 ms slap with feedback = the pap fluttering down the tube.
+    this.pipeIn = ctx.createGain();
+    this.pipeIn.gain.value = 1;
+    const pipeOut = ctx.createGain();
+    pipeOut.gain.value = 0.9;
+    const ring = ctx.createDelay(0.05);
+    ring.delayTime.value = 0.0044;
+    const ringBp = ctx.createBiquadFilter();
+    ringBp.type = "bandpass";
+    ringBp.frequency.value = 1050;
+    ringBp.Q.value = 0.7;
+    const ringFb = ctx.createGain();
+    ringFb.gain.value = 0.58;
+    this.pipeIn.connect(ring);
+    ring.connect(ringBp);
+    ringBp.connect(ringFb);
+    ringFb.connect(ring);
+    ring.connect(pipeOut);
+    const slap = ctx.createDelay(0.1);
+    slap.delayTime.value = 0.019;
+    const slapLp = ctx.createBiquadFilter();
+    slapLp.type = "lowpass";
+    slapLp.frequency.value = 1600;
+    const slapFb = ctx.createGain();
+    slapFb.gain.value = 0.42;
+    this.pipeIn.connect(slap);
+    slap.connect(slapLp);
+    slapLp.connect(slapFb);
+    slapFb.connect(slap);
+    slapLp.connect(pipeOut);
+    pipeOut.connect(this.popBus);
   }
 
   setMuted(m: boolean) {
@@ -223,11 +259,11 @@ class EngineSound {
     }
   }
 
-  /** an irregular machine-gun burst of crackles, tapering off */
+  /** an irregular machine-gun burst of crackles — pap pap pap, tapering */
   volley(count: number, baseIntensity: number) {
     let at = 0;
     for (let i = 0; i < count; i++) {
-      at += 26 + Math.random() * 74;
+      at += 55 + Math.random() * 55;
       const taper = 1 - (0.45 * i) / count;
       const inten =
         baseIntensity * taper * (0.55 + Math.random() * 0.65);
@@ -284,13 +320,17 @@ class EngineSound {
     pan.pan.value = (Math.random() - 0.5) * 0.5;
     shaper.connect(pan);
     const dry = ctx.createGain();
-    dry.gain.value = 1;
+    dry.gain.value = 0.85;
     const wet = ctx.createGain();
     wet.gain.value = 0.12 + 0.55 * inten;
+    const pipe = ctx.createGain();
+    pipe.gain.value = 0.55 + 0.3 * inten;
     pan.connect(dry);
     pan.connect(wet);
+    pan.connect(pipe);
     dry.connect(this.popBus);
     wet.connect(this.verb);
+    pipe.connect(this.pipeIn);
 
     const burst = (
       at: number,
@@ -325,18 +365,18 @@ class EngineSound {
     };
 
     // 0) detonation tick — a ~4 ms near-impulse; the flame front arriving
-    burst(t0, 0.004, 0.5 + 0.3 * inten, 6800, 3200, "highpass", 0.7, 6);
+    burst(t0, 0.004, 0.35 + 0.25 * inten, 6200, 3000, "highpass", 0.7, 6);
 
-    // 1) the CRACK — main broadband report, very fast decay
+    // 1) the PAP — tonal mid punch, the mouth of the pipe speaking
     burst(
       t0 + 0.001,
-      0.013 + 0.016 * inten,
-      0.6 + 0.4 * inten,
-      2400 + Math.random() * 2400,
-      750,
+      0.02 + 0.022 * inten,
+      0.65 + 0.4 * inten,
+      750 + Math.random() * 550,
+      280,
       "bandpass",
-      0.9,
-      12,
+      1.5,
+      10,
     );
 
     // 2) the whump — the pressure wave rolling out of the pipe
@@ -360,8 +400,8 @@ class EngineSound {
           at,
           0.012 + Math.random() * 0.02,
           (0.1 + 0.2 * inten) * (0.4 + Math.random() * 0.6),
-          2800 + Math.random() * 2600,
-          900,
+          1800 + Math.random() * 1600,
+          700,
           "bandpass",
           1.3,
           11,

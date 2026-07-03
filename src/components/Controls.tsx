@@ -16,24 +16,33 @@ export default function Controls({ spec }: { spec: EngineSpec }) {
     engineSound.setMuted(muted);
   }, [muted]);
 
-  // global keys: W or Space = wide-open throttle, E/Q = shift gears,
-  // digits = direct gear selection (0 = neutral)
+  // global keys: W or Space = wide-open throttle, S = full brake,
+  // E/Q = shift gears, digits = direct gear selection (0 = neutral)
   useEffect(() => {
     const isTyping = (e: KeyboardEvent) =>
       (e.target as HTMLElement)?.closest("input,textarea,[tabindex]") !== null;
+    // remember where the brake slider was so releasing S puts it back
+    let brakeBefore: number | null = null;
     const down = (e: KeyboardEvent) => {
       if (e.repeat || isTyping(e)) return;
       const k = e.key.toLowerCase();
       if (k === "w" || e.code === "Space") {
         e.preventDefault(); // Space would otherwise scroll / toggle controls
         engine.setThrottle(1);
+      } else if (k === "s") {
+        if (brakeBefore === null) brakeBefore = engine.getSnapshot().brake;
+        engine.setBrake(1);
       } else if (k === "e") engine.shift(1);
       else if (k === "q") engine.shift(-1);
       else if (/^[0-9]$/.test(k)) engine.setGear(Number(k) - 1);
     };
     const up = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() === "w" || e.code === "Space")
-        engine.setThrottle(0);
+      const k = e.key.toLowerCase();
+      if (k === "w" || e.code === "Space") engine.setThrottle(0);
+      else if (k === "s") {
+        engine.setBrake(brakeBefore ?? 0.15);
+        brakeBefore = null;
+      }
     };
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
@@ -152,6 +161,7 @@ export default function Controls({ spec }: { spec: EngineSpec }) {
             max={100}
             step={1}
             onChange={(v) => engine.setBrake(v / 100)}
+            hint="hold S for full brake"
           />
         </>
       ) : (
@@ -163,7 +173,7 @@ export default function Controls({ spec }: { spec: EngineSpec }) {
           max={100}
           step={1}
           onChange={(v) => engine.setBrake(v / 100)}
-          hint="load on the engine"
+          hint="load on the engine · hold S for max"
         />
       )}
 

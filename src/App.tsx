@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { buildAxes, clamp, cloneGrid } from "./engine/axes";
 import { ENGINES, getEngine } from "./engine/engines";
-import { baseMaps, type Maps } from "./engine/defaults";
+import { baseMaps, isUnlocked, type Maps } from "./engine/defaults";
 import { engine } from "./engine/store";
 import { useTuneStore, validMaps } from "./store/tuneStore";
 import PresetMenu from "./components/PresetMenu";
@@ -15,6 +15,7 @@ import HelpPanel from "./components/HelpPanel";
 import FailureOverlay from "./components/FailureOverlay";
 import RacePanel from "./components/RacePanel";
 import AcademyPanel from "./components/AcademyPanel";
+import DriverName from "./components/DriverName";
 import { useGameStore } from "./store/gameStore";
 import type { Exercise } from "./engine/exercises";
 
@@ -53,6 +54,11 @@ const SECTIONS: {
 
 const sectionOf = (t: Tab): Section =>
   SECTIONS.find((s) => s.tabs.some((x) => x.id === t))!.id;
+
+/** engines hidden behind the ?unlocked=true flag (the 450 bhp build) */
+const LOCKED_ENGINES = new Set(["stmk45bt"]);
+const selectableEngines = () =>
+  isUnlocked() ? ENGINES : ENGINES.filter((e) => !LOCKED_ENGINES.has(e.id));
 
 /** invite links: ?join=drag-XKR42 lands the guest straight in the lobby */
 const pendingJoinCode = (() => {
@@ -101,6 +107,14 @@ export default function App() {
     engine.start();
     return () => engine.stop();
   }, []);
+
+  // don't leave a locked engine selected (e.g. persisted from an unlocked
+  // session) when the ?unlocked flag isn't set
+  useEffect(() => {
+    if (!isUnlocked() && LOCKED_ENGINES.has(engineId)) {
+      setEngineId(ENGINES[0].id);
+    }
+  }, [engineId, setEngineId]);
 
   // configure the sim on engine swap (and first mount); afterwards just feed
   // it the latest maps without resetting hardware
@@ -202,7 +216,7 @@ export default function App() {
           className="rounded border border-grid bg-raised px-2 py-1 text-xs font-semibold text-ink"
           title={spec.desc}
         >
-          {ENGINES.map((e) => (
+          {selectableEngines().map((e) => (
             <option key={e.id} value={e.id}>
               {e.name}
             </option>
@@ -210,6 +224,7 @@ export default function App() {
         </select>
         <span className="hidden text-xs text-muted lg:inline">{spec.desc}</span>
         <div className="ml-auto flex items-center gap-2">
+          <DriverName />
           <button
             onClick={undo}
             className="rounded border border-grid px-2 py-1 text-xs text-ink2 hover:text-ink"

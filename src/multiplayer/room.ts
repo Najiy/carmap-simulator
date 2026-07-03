@@ -75,6 +75,27 @@ const makeCode = () =>
  *  disconnect removes the player, so there is nothing to reconnect to) */
 const defaultId = () => crypto.randomUUID().slice(0, 12);
 
+/** courtesy hash — keeps passwords out of the DB in plain text */
+async function hashPass(code: string, pass: string): Promise<string> {
+  const data = new TextEncoder().encode(`carmap:${code}:${pass}`);
+  const buf = await crypto.subtle.digest("SHA-256", data);
+  return [...new Uint8Array(buf)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/** one row in the public "open races" browser */
+export interface LobbyEntry {
+  code: string;
+  hostName: string;
+  engineName: string;
+  peakHp: number;
+  players: number;
+  hasPass: boolean;
+  status: RoomStatus;
+  createdAt: number;
+}
+
 export function friendlyDbError(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);
   if (/permission|denied/i.test(msg)) {
@@ -96,6 +117,7 @@ export class RaceRoom {
   private unsubClock: Unsubscribe | null = null;
   private clockOffset = 0;
   private lastLiveSend = 0;
+  private lastIdxSig = "";
   private snapshot: RoomSnapshot | null = null;
   private listeners = new Set<(s: RoomSnapshot | null) => void>();
 
@@ -111,7 +133,11 @@ export class RaceRoom {
     return Date.now() + this.clockOffset;
   }
 
-  static async host(me: RoomPlayer, id = defaultId()): Promise<RaceRoom> {
+  static async host(
+    me: RoomPlayer,
+    opts: { pass?: string } = {},
+    id = defaultId(),
+  ): Promise<RaceRoom> {
     const db = getDatabase(app);
     // find a free code (collisions are astronomically rare, but be tidy)
     let code = makeCode();
@@ -121,15 +147,29 @@ export class RaceRoom {
       code = makeCode();
     }
     const room = new RaceRoom(code, true, id);
+    const pass = opts.pass?.trim() ?? "";
     await set(room.roomRef, {
       createdAt: serverTimestamp(),
       hostId: id,
       status: "lobby",
       greenAt: null,
+      passHash: pass ? await hashPass(code, pass) : null,
       players: { [id]: me },
     });
     // if the host vanishes, the room dies with them
     onDisconnect(room.roomRef).remove();
+    // the public browser row — kept fresh by the host, gone when they are
+    const lobbyRef = ref(db, `lobby/${code}`);
+    await set(lobbyRef, {
+      createdAt: serverTimestamp(),
+      hostName: me.name,
+      engineName: me.engineName,
+      peakHp: me.peakHp,
+      players: 1,
+      hasPass: !!pass,
+      status: "lobby",
+    });
+    onDisconnect(lobbyRef).remove();
     room.listen();
     return room;
   }
@@ -137,6 +177,7 @@ export class RaceRoom {
   static async join(
     codeRaw: string,
     me: RoomPlayer,
+    pass = "",
     id = defaultId(),
   ): Promise<RaceRoom> {
     const code = codeRaw.trim().toUpperCase();
@@ -151,6 +192,18 @@ export class RaceRoom {
     }
     if (typeof val.createdAt === "number" && Date.now() - val.createdAt > 2 * 3600_000) {
       throw new Error("That race code has expired.");
+    }
+    if (val.passHash) {
+      const attempt = pass.trim()
+        ? await hashPass(code, pass.trim())
+        : "";
+      if (attempt !== val.passHash) {
+        throw new Error(
+          pass.trim()
+            ? "Wrong password for that race."
+            : "That race is password-locked — enter the password to join.",
+        );
+      }
     }
     const room = new RaceRoom(code, false, id);
     await set(ref(db, `rooms/${code}/players/${id}`), me);
@@ -182,8 +235,59 @@ export class RaceRoom {
         live: v.live ?? {},
         results: v.results ?? {},
       };
+      // the host mirrors the essentials onto the public browser row
+      if (this.isHost) {
+        const me = this.snapshot.players[this.myId];
+        const sig = [
+          Object.keys(this.snapshot.players).length,
+          this.snapshot.status,
+          me?.name,
+          me?.engineName,
+          me?.peakHp,
+        ].join("|");
+        if (sig !== this.lastIdxSig) {
+          this.lastIdxSig = sig;
+          update(ref(getDatabase(app), `lobby/${this.code}`), {
+            players: Object.keys(this.snapshot.players).length,
+            status: this.snapshot.status,
+            hostName: me?.name ?? "?",
+            engineName: me?.engineName ?? "?",
+            peakHp: me?.peakHp ?? 0,
+          }).catch(() => {});
+        }
+      }
       this.listeners.forEach((fn) => fn(this.snapshot));
     });
+  }
+
+  /** live list of open races for the browser — returns an unsubscribe */
+  static watchLobby(cb: (list: LobbyEntry[]) => void): () => void {
+    const db = getDatabase(app);
+    return onValue(
+      ref(db, "lobby"),
+      (s) => {
+        const v = (s.val() ?? {}) as Record<
+          string,
+          Partial<LobbyEntry> & { createdAt?: number }
+        >;
+        const now = Date.now();
+        const list: LobbyEntry[] = Object.entries(v)
+          .map(([code, e]) => ({
+            code,
+            hostName: e.hostName ?? "?",
+            engineName: e.engineName ?? "?",
+            peakHp: e.peakHp ?? 0,
+            players: e.players ?? 1,
+            hasPass: !!e.hasPass,
+            status: (e.status ?? "lobby") as RoomStatus,
+            createdAt: e.createdAt ?? 0,
+          }))
+          .filter((e) => now - e.createdAt < 2 * 3600_000)
+          .sort((a, b) => b.createdAt - a.createdAt);
+        cb(list);
+      },
+      () => cb([]),
+    );
   }
 
   onChange(fn: (s: RoomSnapshot | null) => void): () => void {
@@ -261,9 +365,8 @@ export class RaceRoom {
     );
   }
 
-  /** host only: back to the lobby for another round */
+  /** any driver can pull the whole room back to the lobby for another round */
   async rematch(): Promise<void> {
-    if (!this.isHost) return;
     const updates: Record<string, unknown> = {
       status: "lobby",
       greenAt: null,
@@ -284,6 +387,7 @@ export class RaceRoom {
     try {
       if (this.isHost) {
         await remove(this.roomRef);
+        await remove(ref(db, `lobby/${this.code}`));
       } else {
         await remove(ref(db, `rooms/${this.code}/players/${this.myId}`));
         await remove(ref(db, `rooms/${this.code}/live/${this.myId}`));

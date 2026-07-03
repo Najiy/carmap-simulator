@@ -8,6 +8,13 @@
         ".write": true,
         ".validate": "$code.length >= 4 && $code.length <= 8"
       }
+    },
+    "lobby": {
+      ".read": true,
+      "$code": {
+        ".write": true,
+        ".validate": "$code.length >= 4 && $code.length <= 8"
+      }
     }
   }
 }

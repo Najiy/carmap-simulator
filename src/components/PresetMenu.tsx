@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import type { Axes } from "../engine/axes";
 import type { EngineSpec } from "../engine/engines";
 import { PRESETS, type Maps } from "../engine/defaults";
+import { engine } from "../engine/store";
 import { useTuneStore, validMaps } from "../store/tuneStore";
 
 export default function PresetMenu({
@@ -56,16 +57,26 @@ export default function PresetMenu({
               <div className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">
                 Built-in
               </div>
-              {PRESETS.map((p) => (
+              {PRESETS.filter(
+                (p) => !p.engineId || p.engineId === spec.id,
+              ).map((p) => (
                 <button
                   key={p.id}
                   onClick={() => {
                     onLoad(p.make(spec, axes));
+                    if (p.wastegateKpa && spec.turbo) {
+                      engine.setWastegate(p.wastegateKpa);
+                    }
                     setOpen(false);
                   }}
                   className="block w-full rounded px-2 py-1.5 text-left text-xs text-ink2 hover:bg-surface hover:text-ink"
                 >
                   {p.label}
+                  {p.wastegateKpa ? (
+                    <span className="ml-1 text-[10px] text-muted">
+                      (sets wastegate {p.wastegateKpa} kPa)
+                    </span>
+                  ) : null}
                 </button>
               ))}
 

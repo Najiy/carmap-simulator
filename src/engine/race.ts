@@ -10,6 +10,8 @@ export const SIXTY_FEET_M = 18.288;
 export const RACE_STEP = 1 / 120;
 /** seconds of staging (amber lights) before the green */
 export const STAGE_S = 1.5;
+/** hard cap on a run — the clock stops at 30 s, whatever's happened */
+export const RACE_TIMEOUT = 30;
 
 /** clutch-slip rev ceiling while stationary / launching */
 export const launchRpm = (spec: EngineSpec) =>
@@ -252,7 +254,7 @@ export function simulateGhost(env: RaceEnv, throttleFrom: number): GhostResult {
   const car = createRaceCar(env.spec, 100);
   const frames: GhostFrame[] = [];
   let i = 0;
-  while (car.t < 35) {
+  while (car.t < RACE_TIMEOUT) {
     const throttle = car.t >= throttleFrom;
     const shiftUp =
       car.t >= 0 &&

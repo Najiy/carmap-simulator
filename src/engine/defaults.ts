@@ -136,6 +136,49 @@ export function optimalMaps(spec: EngineSpec, axes: Axes, margin = 0.6): Maps {
   };
 }
 
+/**
+ * The party tune: exact-VE fueling at power AFRs under boost, and the
+ * overrun rows (what the ECU reads on a closed throttle at revs) fuelled
+ * deep-rich with retarded spark — the unburnt mixture lights off in the
+ * pipe. Pops, crackles, bangs: the map IS the soundtrack.
+ */
+export function popsBangsMaps(spec: EngineSpec, axes: Axes): Maps {
+  const overrun = (l: number, r: number) => l <= 48 && r >= 2200;
+  const afrFor = (l: number, r: number) =>
+    overrun(l, r)
+      ? 10.8
+      : interp1(
+          [
+            [20, 13.8],
+            [48, 13.8],
+            [64, 13.2],
+            [80, 12.9],
+            [100, 12.6],
+            [140, 12.3],
+            [180, 12.1],
+            [220, 12.0],
+            [260, 11.9],
+          ],
+          l,
+        );
+  return {
+    fuel: makeGrid(axes, (l, r) =>
+      round2(pwFor(spec, l, trueVE(spec, r, l), afrFor(l, r))),
+    ),
+    ign: makeGrid(axes, (l, r) => {
+      if (overrun(l, r)) return 12; // burn it in the pipe, not the cylinder
+      const afr = afrFor(l, r);
+      return round1(
+        Math.max(
+          4,
+          Math.min(mbtSpark(r, l), knockLimit(spec, r, l, afr) - 1.2),
+        ),
+      );
+    }),
+    afrTarget: makeGrid(axes, (l, r) => round1(afrFor(l, r))),
+  };
+}
+
 /** Pro-tune reference maps are hidden unless the URL carries ?unlocked=true */
 export const isUnlocked = () =>
   new URLSearchParams(window.location.search).get("unlocked") === "true";
@@ -144,9 +187,20 @@ export const PRESETS: {
   id: string;
   label: string;
   make: (spec: EngineSpec, axes: Axes) => Maps;
+  /** only offered on this engine */
+  engineId?: string;
+  /** wastegate pressure applied when the preset loads */
+  wastegateKpa?: number;
 }[] = [
   { id: "base", label: "Base calibration (needs tuning)", make: baseMaps },
   { id: "rich", label: "Rich & safe (slow)", make: richSafeMaps },
+  {
+    id: "popsbangs450",
+    label: "Mk4.5 450 — pops & bangs (the party tune)",
+    make: popsBangsMaps,
+    engineId: "stmk45bt",
+    wastegateKpa: 256,
+  },
   ...(isUnlocked()
     ? [{ id: "expert", label: "Pro tune (reference)", make: expertMaps }]
     : []),
