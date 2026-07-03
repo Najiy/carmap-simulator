@@ -12,16 +12,21 @@ class EngineSound {
   private oscFund!: OscillatorNode;
   private oscHalf!: OscillatorNode;
   private oscDouble!: OscillatorNode;
+  private oscSub!: OscillatorNode;
   private gFund!: GainNode;
   private gHalf!: GainNode;
   private gDouble!: GainNode;
+  private gSub!: GainNode;
   private filter!: BiquadFilterNode;
   private noiseGain!: GainNode;
   /** pops route through a compressor — the "glue" that makes volleys punchy */
   private popBus!: DynamicsCompressorNode;
+  /** short outdoor reverb — the open-air report that sells a real bang */
+  private verb!: ConvolverNode;
   private lastPing = 0;
   private lastPop = 0;
   private lastCrackleT = 0;
+  private volleyCooldownUntil = 0;
   private _muted = false;
 
   get muted() {
@@ -41,11 +46,14 @@ class EngineSound {
     this.master.gain.value = 0;
     this.master.connect(ctx.destination);
 
-    // soft distortion → lowpass → master
+    // harder distortion → lowpass → pipe resonance → low-shelf body → master:
+    // big-bore straight pipe — raspier midrange, fat fundamental, and a
+    // fixed ~110 Hz resonance so the exhaust DRONES when the firing
+    // frequency sweeps through it
     const shaper = ctx.createWaveShaper();
     const curve = new Float32Array(256);
     for (let i = 0; i < 256; i++) {
-      const x = (i / 127.5 - 1) * 2.5;
+      const x = (i / 127.5 - 1) * 3.4;
       curve[i] = Math.tanh(x);
     }
     shaper.curve = curve;
@@ -53,8 +61,19 @@ class EngineSound {
     this.filter.type = "lowpass";
     this.filter.frequency.value = 800;
     this.filter.Q.value = 0.8;
+    const pipeRes = ctx.createBiquadFilter();
+    pipeRes.type = "peaking";
+    pipeRes.frequency.value = 110;
+    pipeRes.Q.value = 1.3;
+    pipeRes.gain.value = 6.5;
+    const shelf = ctx.createBiquadFilter();
+    shelf.type = "lowshelf";
+    shelf.frequency.value = 200;
+    shelf.gain.value = 7;
     shaper.connect(this.filter);
-    this.filter.connect(this.master);
+    this.filter.connect(pipeRes);
+    pipeRes.connect(shelf);
+    shelf.connect(this.master);
 
     const mkOsc = (type: OscillatorType) => {
       const o = ctx.createOscillator();
@@ -69,6 +88,8 @@ class EngineSound {
     [this.oscFund, this.gFund] = mkOsc("sawtooth");
     [this.oscHalf, this.gHalf] = mkOsc("triangle");
     [this.oscDouble, this.gDouble] = mkOsc("square");
+    // sub-order sine — the chest thump every straight-piped car has
+    [this.oscSub, this.gSub] = mkOsc("sine");
 
     // looped white noise → bandpass → gain → master (intake/boost hiss)
     const len = ctx.sampleRate * 2;
@@ -98,6 +119,27 @@ class EngineSound {
     this.popBus.attack.value = 0.001;
     this.popBus.release.value = 0.09;
     this.popBus.connect(ctx.destination);
+
+    // procedural outdoor impulse response: ~0.9 s of darkening stereo decay.
+    // This is what turns a dry click into a bang heard from behind the car.
+    const irDur = 0.9;
+    const irLen = Math.floor(ctx.sampleRate * irDur);
+    const ir = ctx.createBuffer(2, irLen, ctx.sampleRate);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = ir.getChannelData(ch);
+      let lp = 0;
+      for (let i = 0; i < irLen; i++) {
+        const w = (Math.random() * 2 - 1) * Math.exp((-5.5 * i) / irLen);
+        lp += (w - lp) * 0.22; // one-pole darkening: reflections lose highs
+        d[i] = lp * 1.9;
+      }
+    }
+    this.verb = ctx.createConvolver();
+    this.verb.buffer = ir;
+    const verbOut = ctx.createGain();
+    verbOut.gain.value = 0.9;
+    this.verb.connect(verbOut);
+    verbOut.connect(ctx.destination);
   }
 
   setMuted(m: boolean) {
@@ -124,38 +166,76 @@ class EngineSound {
     set(this.oscFund.frequency, firing, 0.02);
     set(this.oscHalf.frequency, firing / 2, 0.02);
     set(this.oscDouble.frequency, firing * 2, 0.02);
+    set(this.oscSub.frequency, Math.max(24, firing / 2), 0.02);
 
-    set(this.gFund.gain, 0.2);
+    set(this.gFund.gain, 0.24);
     set(this.gHalf.gain, 0.22 * spec.sound.half);
-    set(this.gDouble.gain, 0.09 * spec.sound.bright);
+    set(this.gDouble.gain, 0.08 * spec.sound.bright);
+    // the sub thump swells with load — open pipe, open lungs
+    set(this.gSub.gain, 0.16 + 0.14 * throttle + 0.08 * boost01);
 
-    set(this.filter.frequency, 260 + throttle * 3200 + rpm * 0.25, 0.06);
-    set(this.noiseGain.gain, running ? 0.006 + boost01 * 0.05 : 0);
+    set(this.filter.frequency, 300 + throttle * 3600 + rpm * 0.3, 0.06);
+    // exhaust roar rises with throttle, not just boost hiss
+    set(
+      this.noiseGain.gain,
+      running ? 0.006 + boost01 * 0.05 + throttle * 0.014 : 0,
+    );
 
     const vol = !running || this._muted
       ? 0
-      : 0.07 + 0.16 * (0.3 + 0.7 * throttle) * (0.35 + 0.65 * (rpm / spec.redline));
+      : 0.08 + 0.17 * (0.35 + 0.65 * throttle) * (0.35 + 0.65 * (rpm / spec.redline));
     set(this.master.gain, vol, 0.08);
 
     // overrun pops & bangs: lift the throttle with revs up and the ECU still
     // reads the fuel map at the low-MAP rows — if those cells run rich, the
-    // unburnt fuel lights off in the hot exhaust. The tune IS the soundtrack.
+    // unburnt fuel lights off in the hot exhaust. Real overrun isn't a
+    // metronome: it's irregular machine-gun volleys with gaps between them.
     const now = performance.now();
     const dt = Math.min(0.1, (now - this.lastCrackleT) / 1000);
     this.lastCrackleT = now;
-    if (running && throttle < 0.12 && rpm > 2200 && afr < 13.4) {
+    if (
+      running &&
+      throttle < 0.12 &&
+      rpm > 2200 &&
+      afr < 13.4 &&
+      now > this.volleyCooldownUntil
+    ) {
       const rich = Math.min(1, (13.4 - afr) / 3.2);
       const revs = Math.min(
         1,
         (rpm - 2200) / Math.max(1, spec.redline - 2200),
       );
-      const rate = rich * (3 + 22 * revs); // events / sec — proper volleys
+      const rate = rich * (2.5 + 14 * revs); // volley windows / sec
       if (Math.random() < rate * dt) {
-        const bang = Math.random() < 0.1 + 0.28 * rich;
-        this.pop(
-          bang ? 0.65 + 0.35 * Math.random() : 0.15 + 0.4 * Math.random(),
-        );
+        if (Math.random() < 0.4 + 0.3 * rich) {
+          // brrrap — a proper burst, then silence
+          const n = 3 + Math.floor(Math.random() * (3 + 5 * rich));
+          this.volley(n, 0.22 + 0.5 * rich);
+          this.volleyCooldownUntil = now + n * 60 + 250 + Math.random() * 500;
+        } else {
+          const bang = Math.random() < 0.12 + 0.25 * rich;
+          this.pop(
+            bang ? 0.68 + 0.32 * Math.random() : 0.15 + 0.4 * Math.random(),
+          );
+          this.volleyCooldownUntil = now + 60;
+        }
       }
+    }
+  }
+
+  /** an irregular machine-gun burst of crackles, tapering off */
+  volley(count: number, baseIntensity: number) {
+    let at = 0;
+    for (let i = 0; i < count; i++) {
+      at += 26 + Math.random() * 74;
+      const taper = 1 - (0.45 * i) / count;
+      const inten =
+        baseIntensity * taper * (0.55 + Math.random() * 0.65);
+      const bang = Math.random() < 0.1;
+      window.setTimeout(
+        () => this.pop(bang ? Math.min(1, inten + 0.45) : inten),
+        at,
+      );
     }
   }
 
@@ -179,30 +259,38 @@ class EngineSound {
   }
 
   /**
-   * One exhaust event, layered for bite: an instant high-frequency SNAP,
-   * a boom body, a couple of trailing micro-crackles, and — for the big
-   * ones — a sub thump with a mid-bark. Everything runs through a tanh
-   * soft-clip and the pop compressor for edge and punch.
-   * intensity 0..1 — small = dry crackle, large = artillery.
+   * One exhaust event heard from BEHIND the car: a near-impulse detonation
+   * tick, the main broadband crack, the low pressure "whump", a sub thump
+   * for the heavy ones — all with an open-air reverb send so big bangs get
+   * the outdoor "crack-BOOM-mm" report instead of a dry click.
+   * intensity 0..1 — small = dry popcorn crackle, large = artillery.
    */
   pop(intensity = 0.5) {
     if (!this.ctx || this._muted) return;
     const now = performance.now();
-    if (now - this.lastPop < 45) return;
+    if (now - this.lastPop < 26) return;
     this.lastPop = now;
     const ctx = this.ctx;
     const t0 = ctx.currentTime + 0.002;
     const inten = Math.min(1, Math.max(0, intensity));
 
-    // per-event output: soft clip → slight random pan → pop bus
+    // per-event output: soft clip → slight random pan, then split to the
+    // dry pop bus and the outdoor reverb (wet grows with intensity)
     const shaper = ctx.createWaveShaper();
     const curve = new Float32Array(128);
-    for (let i = 0; i < 128; i++) curve[i] = Math.tanh((i / 63.5 - 1) * 2.6);
+    for (let i = 0; i < 128; i++) curve[i] = Math.tanh((i / 63.5 - 1) * 2.3);
     shaper.curve = curve;
     const pan = ctx.createStereoPanner();
-    pan.pan.value = (Math.random() - 0.5) * 0.6;
+    pan.pan.value = (Math.random() - 0.5) * 0.5;
     shaper.connect(pan);
-    pan.connect(this.popBus);
+    const dry = ctx.createGain();
+    dry.gain.value = 1;
+    const wet = ctx.createGain();
+    wet.gain.value = 0.12 + 0.55 * inten;
+    pan.connect(dry);
+    pan.connect(wet);
+    dry.connect(this.popBus);
+    wet.connect(this.verb);
 
     const burst = (
       at: number,
@@ -212,12 +300,13 @@ class EngineSound {
       fTo: number,
       type: BiquadFilterType,
       q = 0.8,
+      decay = 9,
     ) => {
       const len = Math.max(1, Math.floor(ctx.sampleRate * dur));
       const buf = ctx.createBuffer(1, len, ctx.sampleRate);
       const d = buf.getChannelData(0);
       for (let i = 0; i < len; i++) {
-        d[i] = (Math.random() * 2 - 1) * Math.exp((-9 * i) / len);
+        d[i] = (Math.random() * 2 - 1) * Math.exp((-decay * i) / len);
       }
       const src = ctx.createBufferSource();
       src.buffer = buf;
@@ -235,71 +324,64 @@ class EngineSound {
       src.start(at);
     };
 
-    // 1) the SNAP — instant, bright, dry; this is the "crack" you feel
+    // 0) detonation tick — a ~4 ms near-impulse; the flame front arriving
+    burst(t0, 0.004, 0.5 + 0.3 * inten, 6800, 3200, "highpass", 0.7, 6);
+
+    // 1) the CRACK — main broadband report, very fast decay
     burst(
-      t0,
-      0.022 + 0.02 * inten,
-      0.5 + 0.45 * inten,
-      3800 + Math.random() * 1800,
-      900,
+      t0 + 0.001,
+      0.013 + 0.016 * inten,
+      0.6 + 0.4 * inten,
+      2400 + Math.random() * 2400,
+      750,
       "bandpass",
-      1.1,
+      0.9,
+      12,
     );
 
-    // 2) the body — the boom right behind it
+    // 2) the whump — the pressure wave rolling out of the pipe
     burst(
-      t0 + 0.006,
-      0.06 + 0.15 * inten,
-      0.35 + 0.45 * inten,
-      900 + 1500 * inten,
-      120,
+      t0 + 0.005,
+      0.05 + 0.12 * inten,
+      0.35 + 0.5 * inten,
+      420 + 580 * inten,
+      85,
       "lowpass",
+      0.8,
+      7,
     );
 
-    // 3) trailing micro-crackles — the fizz that sells it
-    const tails = 1 + Math.floor(Math.random() * (2 + 2.5 * inten));
-    for (let i = 0; i < tails; i++) {
-      const at = t0 + 0.035 + Math.random() * (0.09 + 0.12 * inten);
-      burst(
-        at,
-        0.015 + Math.random() * 0.03,
-        (0.12 + 0.28 * inten) * (0.4 + Math.random() * 0.6),
-        2500 + Math.random() * 2800,
-        700,
-        "bandpass",
-        1.4,
-      );
+    // 3) trailing fizz — brief, quiet, only on the meatier pops
+    if (inten > 0.3) {
+      const tails = Math.floor(Math.random() * (1 + 2 * inten));
+      for (let i = 0; i < tails; i++) {
+        const at = t0 + 0.03 + Math.random() * 0.08;
+        burst(
+          at,
+          0.012 + Math.random() * 0.02,
+          (0.1 + 0.2 * inten) * (0.4 + Math.random() * 0.6),
+          2800 + Math.random() * 2600,
+          900,
+          "bandpass",
+          1.3,
+          11,
+        );
+      }
     }
 
-    // 4) the BANG — sub thump + mid bark for the heavy hitters
+    // 4) the BANG — sub pressure thump for the heavy hitters
     if (inten > 0.5) {
       const o = ctx.createOscillator();
       o.type = "sine";
-      o.frequency.setValueAtTime(150 + 50 * Math.random(), t0);
-      o.frequency.exponentialRampToValueAtTime(38, t0 + 0.1);
+      o.frequency.setValueAtTime(130 + 40 * Math.random(), t0);
+      o.frequency.exponentialRampToValueAtTime(34, t0 + 0.11);
       const og = ctx.createGain();
-      og.gain.setValueAtTime(0.5 * inten, t0);
-      og.gain.exponentialRampToValueAtTime(0.001, t0 + 0.15);
+      og.gain.setValueAtTime(0.55 * inten, t0);
+      og.gain.exponentialRampToValueAtTime(0.001, t0 + 0.16);
       o.connect(og);
       og.connect(shaper);
       o.start(t0);
-      o.stop(t0 + 0.16);
-
-      const bark = ctx.createOscillator();
-      bark.type = "square";
-      bark.frequency.setValueAtTime(300 + Math.random() * 120, t0 + 0.004);
-      bark.frequency.exponentialRampToValueAtTime(90, t0 + 0.05);
-      const bg = ctx.createGain();
-      bg.gain.setValueAtTime(0.16 * inten, t0 + 0.004);
-      bg.gain.exponentialRampToValueAtTime(0.001, t0 + 0.06);
-      const blp = ctx.createBiquadFilter();
-      blp.type = "lowpass";
-      blp.frequency.value = 900;
-      bark.connect(blp);
-      blp.connect(bg);
-      bg.connect(shaper);
-      bark.start(t0 + 0.004);
-      bark.stop(t0 + 0.07);
+      o.stop(t0 + 0.17);
     }
   }
 

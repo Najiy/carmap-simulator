@@ -16,7 +16,7 @@ export default function Controls({ spec }: { spec: EngineSpec }) {
     engineSound.setMuted(muted);
   }, [muted]);
 
-  // global keys: W = wide-open throttle, Shift/Ctrl (or E/Q) = shift gears,
+  // global keys: W or Space = wide-open throttle, E/Q = shift gears,
   // digits = direct gear selection (0 = neutral)
   useEffect(() => {
     const isTyping = (e: KeyboardEvent) =>
@@ -24,13 +24,16 @@ export default function Controls({ spec }: { spec: EngineSpec }) {
     const down = (e: KeyboardEvent) => {
       if (e.repeat || isTyping(e)) return;
       const k = e.key.toLowerCase();
-      if (k === "w") engine.setThrottle(1);
-      else if (k === "e") engine.shift(1);
+      if (k === "w" || e.code === "Space") {
+        e.preventDefault(); // Space would otherwise scroll / toggle controls
+        engine.setThrottle(1);
+      } else if (k === "e") engine.shift(1);
       else if (k === "q") engine.shift(-1);
       else if (/^[0-9]$/.test(k)) engine.setGear(Number(k) - 1);
     };
     const up = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() === "w") engine.setThrottle(0);
+      if (e.key.toLowerCase() === "w" || e.code === "Space")
+        engine.setThrottle(0);
     };
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
@@ -90,7 +93,7 @@ export default function Controls({ spec }: { spec: EngineSpec }) {
         max={100}
         step={1}
         onChange={(v) => engine.setThrottle(v / 100)}
-        hint="hold W for wide-open"
+        hint="hold W or Space for wide-open"
       />
 
       {s.mode === "drive" ? (
