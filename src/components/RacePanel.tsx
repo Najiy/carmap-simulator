@@ -25,6 +25,22 @@ import {
 } from "../engine/race";
 import { useGameStore } from "../store/gameStore";
 import {
+  brakeDistance,
+  CIRCUIT_LAPS,
+  CIRCUIT_TIMEOUT,
+  circuitOpts,
+  cornerColor,
+  createCircuitState,
+  generateCircuit,
+  nextCorner,
+  simulateCircuitGhost,
+  stepCircuit,
+  weatherLabel,
+  type Circuit,
+  type CircuitState,
+  type RaceMode,
+} from "../engine/circuit";
+import {
   friendlyDbError,
   MAX_PLAYERS,
   RaceRoom,
@@ -34,6 +50,14 @@ import {
 } from "../multiplayer/room";
 
 type Phase = "setup" | "lobby" | "armed" | "done";
+
+/** what this race actually is — fixed at stage/green, read by runner + views */
+interface RaceCfg {
+  mode: RaceMode;
+  circuit: Circuit | null;
+}
+
+const newSeed = () => (Math.random() * 2 ** 31) | 0;
 
 interface OppDisp {
   id: string;
@@ -59,7 +83,7 @@ const OPP_COLORS = [
 interface SoloOutcome {
   kind: "solo";
   me: RaceResult;
-  ghost: GhostResult;
+  ghost: GhostResult & { bestLap?: number | null };
   aiLabel: string;
 }
 interface MpOutcome {
@@ -138,7 +162,10 @@ export default function RacePanel({
 
   const [phase, setPhase] = useState<Phase>(activeRoom ? "lobby" : "setup");
   const [aiLevel, setAiLevel] = useState<AiLevel>("street");
+  const [raceMode, setRaceMode] = useState<RaceMode>("drag");
   const [hud, setHud] = useState<RaceCar | null>(null);
+  const [circHud, setCircHud] = useState<CircuitState | null>(null);
+  const [slip, setSlip] = useState(false);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [roomSnap, setRoomSnap] = useState<RoomSnapshot | null>(
     activeRoom?.current ?? null,
@@ -152,10 +179,12 @@ export default function RacePanel({
 
   const envRef = useRef<RaceEnv | null>(null);
   const ghostRef = useRef<GhostResult | null>(null);
+  const raceCfgRef = useRef<RaceCfg>({ mode: "drag", circuit: null });
   const roomRef = useRef<RaceRoom | null>(activeRoom);
   const unsubRoomRef = useRef<(() => void) | null>(null);
   const greenAtPerfRef = useRef(0);
   const throttleRef = useRef(false);
+  const brakeRef = useRef(false);
   const shiftQueueRef = useRef(0);
   const gearRequestRef = useRef<number | null>(null);
   const autoShiftRef = useRef(autoShift);
@@ -204,13 +233,26 @@ export default function RacePanel({
     engineSound.ensure();
     envRef.current = buildEnv();
     const ai = aiEnv(aiLevel, spec, axes);
-    ghostRef.current = simulateGhost(ai.env, ai.throttleFrom);
+    if (raceMode === "circuit") {
+      const circuit = generateCircuit(newSeed());
+      raceCfgRef.current = { mode: "circuit", circuit };
+      ghostRef.current = simulateCircuitGhost(
+        ai.env,
+        circuit,
+        aiLevel,
+        ai.throttleFrom,
+      );
+    } else {
+      raceCfgRef.current = { mode: "drag", circuit: null };
+      ghostRef.current = simulateGhost(ai.env, ai.throttleFrom);
+    }
     greenAtPerfRef.current = performance.now() + (STAGE_S + 0.4) * 1000;
     throttleRef.current = false;
+    brakeRef.current = false;
     shiftQueueRef.current = 0;
     setOutcome(null);
     setPhase("armed");
-  }, [snap.blown, buildEnv, aiLevel, spec, axes]);
+  }, [snap.blown, buildEnv, aiLevel, raceMode, spec, axes]);
 
   // ---- multiplayer flow ----------------------------------------------------
   const myMeta = useCallback(
@@ -250,9 +292,17 @@ export default function RacePanel({
         engineSound.ensure();
         // lock the tune in NOW — whatever you dialled in while waiting races
         envRef.current = buildEnvRef.current();
+        raceCfgRef.current =
+          s.mode === "circuit"
+            ? {
+                mode: "circuit",
+                circuit: generateCircuit(s.circuitSeed ?? 1, s.laps),
+              }
+            : { mode: "drag", circuit: null };
         greenAtPerfRef.current =
           performance.now() + (s.greenAt - room.serverNow());
         throttleRef.current = false;
+        brakeRef.current = false;
         shiftQueueRef.current = 0;
         setOutcome({ kind: "mp" });
         setPhase("armed");
@@ -273,7 +323,15 @@ export default function RacePanel({
     const s = room.current;
     if (s?.status === "racing" && s.greenAt !== null) {
       const raceClock = (room.serverNow() - s.greenAt) / 1000;
-      if (s.results[room.myId] || raceClock >= RACE_TIMEOUT) {
+      const timeoutS = s.mode === "circuit" ? CIRCUIT_TIMEOUT : RACE_TIMEOUT;
+      raceCfgRef.current =
+        s.mode === "circuit"
+          ? {
+              mode: "circuit",
+              circuit: generateCircuit(s.circuitSeed ?? 1, s.laps),
+            }
+          : { mode: "drag", circuit: null };
+      if (s.results[room.myId] || raceClock >= timeoutS) {
         setOutcome({ kind: "mp" });
         setPhase("done");
       } else {
@@ -322,7 +380,10 @@ export default function RacePanel({
     setBusy(true);
     setMpError(null);
     try {
-      const room = await RaceRoom.host(myMeta(), { pass: hostPass });
+      const room = await RaceRoom.host(myMeta(), {
+        pass: hostPass,
+        mode: raceMode,
+      });
       attachRoom(room);
       setPhase("lobby");
     } catch (e) {
@@ -330,7 +391,7 @@ export default function RacePanel({
     } finally {
       setBusy(false);
     }
-  }, [snap.blown, busy, myMeta, attachRoom, hostPass]);
+  }, [snap.blown, busy, myMeta, attachRoom, hostPass, raceMode]);
 
   const joinRace = useCallback(
     async (codeArg?: string) => {
@@ -389,7 +450,11 @@ export default function RacePanel({
     if (!env) return;
 
     engine.stop(); // race owns the audio + the crank now
+    const cfg = raceCfgRef.current;
+    const circuit = cfg.mode === "circuit" ? cfg.circuit : null;
+    const timeoutS = circuit ? CIRCUIT_TIMEOUT : RACE_TIMEOUT;
     const car = createRaceCar(env.spec, engine.getSnapshot().health);
+    const cs = createCircuitState();
     car.t = (performance.now() - greenAtPerfRef.current) / 1000;
 
     let raf = 0;
@@ -401,11 +466,38 @@ export default function RacePanel({
     let endAt: number | null = null;
     let stopped = false;
 
+    /** true when tucked 2–26 m behind a living rival at speed — less drag */
+    const inSlipstream = (): boolean => {
+      if (car.v < 18) return false;
+      const check = (d: number, blown: boolean) => {
+        const gap = d - car.d;
+        return !blown && gap > 2 && gap < 26;
+      };
+      const room = roomRef.current;
+      if (room) {
+        const s = roomSnapRef.current;
+        return Object.entries(s?.live ?? {}).some(([pid, l]) => {
+          if (pid === room.myId || !l) return false;
+          const age = clamp(car.t - l.t, 0, 0.6);
+          return check(l.d + (l.finished || l.blown ? 0 : l.v * age), l.blown);
+        });
+      }
+      const g = ghostRef.current;
+      if (!g) return false;
+      const gp = ghostAt(g, car.t);
+      return check(gp.d, g.blown && gp.done);
+    };
+
     const loop = (now: number) => {
       if (stopped) return;
       // allow big catch-up chunks: background tabs throttle timers to ~1 Hz
       acc += Math.min(2.5, (now - last) / 1000);
       last = now;
+      // slipstream only matters on circuits — held for the whole frame
+      const slipNow = circuit ? inSlipstream() : false;
+      const stepOpts = circuit
+        ? { ...circuitOpts(circuit, slipNow), brake: brakeRef.current }
+        : undefined;
       let guard = 0;
       while (acc >= RACE_STEP && guard++ < 400) {
         acc -= RACE_STEP;
@@ -418,6 +510,7 @@ export default function RacePanel({
             autoShiftRef.current &&
             !roomRef.current && // auto-shift is a solo assist — multiplayer is manual
             car.gear >= 0 && // never auto-engage first from neutral at speed
+            !brakeRef.current &&
             car.rpm >= env.shiftRpm &&
             car.gear < GEARBOX.ratios.length - 1
           ) {
@@ -433,7 +526,8 @@ export default function RacePanel({
           gearSel = gearRequestRef.current;
           gearRequestRef.current = null;
         }
-        stepRaceCar(car, env, throttleRef.current, shift, gearSel);
+        stepRaceCar(car, env, throttleRef.current, shift, gearSel, RACE_STEP, stepOpts);
+        if (circuit) stepCircuit(car, cs, circuit);
       }
 
       // damage is real: it carries into the engine you tune
@@ -484,14 +578,19 @@ export default function RacePanel({
               trapKph: car.trapKph,
               sixtyFt: car.sixtyFt,
               blown: car.blown,
+              bestLap: circuit ? cs.bestLap : null,
             })
             .catch(() => {});
         }
       }
 
       setHud({ ...car });
+      if (circuit) {
+        setCircHud({ ...cs });
+        setSlip(slipNow);
+      }
 
-      const meDone = car.finished || (car.blown && car.v < 1) || car.t > RACE_TIMEOUT;
+      const meDone = car.finished || (car.blown && car.v < 1) || car.t > timeoutS;
       let oppDone: boolean;
       if (room) {
         const s = roomSnapRef.current;
@@ -502,7 +601,7 @@ export default function RacePanel({
         // a result — drivers who disconnect drop out of players automatically
         oppDone =
           oppIds.length === 0 ||
-          car.t > RACE_TIMEOUT ||
+          car.t > timeoutS ||
           oppIds.every((pid) => {
             if (s?.results[pid]) return true;
             const l = s?.live[pid];
@@ -524,10 +623,12 @@ export default function RacePanel({
               trapKph: car.trapKph,
               sixtyFt: car.sixtyFt,
               blown: car.blown,
+              bestLap: circuit ? cs.bestLap : null,
             })
             .catch(() => {});
         }
-        if (car.et !== null) recordEt(env.spec.id, car.et, car.trapKph);
+        // circuit tracks are random one-offs — only drag ETs are PBs
+        if (car.et !== null && !circuit) recordEt(env.spec.id, car.et, car.trapKph);
         if (!roomRef.current) {
           setOutcome({
             kind: "solo",
@@ -536,6 +637,7 @@ export default function RacePanel({
               trapKph: car.trapKph,
               sixtyFt: car.sixtyFt,
               blown: car.blown,
+              bestLap: circuit ? cs.bestLap : null,
             },
             ghost: ghostRef.current!,
             aiLabel:
@@ -573,10 +675,15 @@ export default function RacePanel({
   // ---- inputs --------------------------------------------------------------
   useEffect(() => {
     if (phase !== "armed") return;
+    const isBrakeKey = (e: KeyboardEvent) =>
+      e.key === "ArrowDown" || ["s", "b"].includes(e.key.toLowerCase());
     const down = (e: KeyboardEvent) => {
       if (e.code === "Space") {
         e.preventDefault();
         throttleRef.current = true;
+      } else if (isBrakeKey(e)) {
+        e.preventDefault();
+        brakeRef.current = true;
       } else if (!e.repeat && (e.key === "ArrowUp" || e.key.toLowerCase() === "e")) {
         e.preventDefault();
         shiftQueueRef.current = 1;
@@ -587,6 +694,7 @@ export default function RacePanel({
     };
     const up = (e: KeyboardEvent) => {
       if (e.code === "Space") throttleRef.current = false;
+      if (isBrakeKey(e)) brakeRef.current = false;
     };
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
@@ -594,6 +702,7 @@ export default function RacePanel({
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
       throttleRef.current = false;
+      brakeRef.current = false;
       gearRequestRef.current = null;
     };
   }, [phase]);
@@ -651,6 +760,8 @@ export default function RacePanel({
           peakHp={myDyno.peakHp.v}
           wastegateKpa={snap.wastegateKpa}
           bestEt={bestEt ? bestEt.et : null}
+          raceMode={raceMode}
+          setRaceMode={setRaceMode}
           aiLevel={aiLevel}
           setAiLevel={setAiLevel}
           onStage={stageSolo}
@@ -681,24 +792,43 @@ export default function RacePanel({
 
       {(phase === "armed" || phase === "done") && (
         <>
-          <TrackView
-            t={t}
-            me={{
-              d: hud?.d ?? 0,
-              label: room ? playerName : "You",
-              blown: hud?.blown ?? false,
-              finished: hud?.finished ?? false,
-            }}
-            opps={opps}
-          />
+          {raceCfgRef.current.circuit ? (
+            <CircuitTrackView
+              t={t}
+              cir={raceCfgRef.current.circuit}
+              cs={circHud}
+              me={{
+                d: hud?.d ?? 0,
+                v: hud?.v ?? 0,
+                label: room ? playerName : "You",
+                blown: hud?.blown ?? false,
+              }}
+              opps={opps}
+              slip={slip}
+            />
+          ) : (
+            <TrackView
+              t={t}
+              me={{
+                d: hud?.d ?? 0,
+                label: room ? playerName : "You",
+                blown: hud?.blown ?? false,
+                finished: hud?.finished ?? false,
+              }}
+              opps={opps}
+            />
+          )}
           {hud && (
             <RaceHud
               car={hud}
               env={envRef.current!}
+              circuit={raceCfgRef.current.circuit}
+              cs={circHud}
               autoShift={autoShift && !room}
               allowAutoShift={!room}
               setAutoShift={setAutoShift}
               onThrottle={(v) => (throttleRef.current = v)}
+              onBrake={(v) => (brakeRef.current = v)}
               onShift={() => (shiftQueueRef.current = 1)}
             />
           )}
@@ -710,6 +840,9 @@ export default function RacePanel({
           <ResultsView
             outcome={outcome}
             hud={hud}
+            cs={circHud}
+            mode={raceCfgRef.current.mode}
+            circuit={raceCfgRef.current.circuit}
             room={room}
             roomSnap={roomSnap}
             bestEt={bestEt ? bestEt.et : null}
@@ -734,6 +867,8 @@ function SetupView(p: {
   peakHp: number;
   wastegateKpa: number;
   bestEt: number | null;
+  raceMode: RaceMode;
+  setRaceMode: (m: RaceMode) => void;
   aiLevel: AiLevel;
   setAiLevel: (l: AiLevel) => void;
   onStage: () => void;
@@ -753,9 +888,42 @@ function SetupView(p: {
 }) {
   return (
     <div className="flex flex-col gap-4">
+      {/* race mode */}
+      <div className="grid gap-2 sm:grid-cols-2">
+        {(
+          [
+            {
+              id: "drag" as const,
+              title: `Drag strip — quarter mile (${QUARTER_MILE_M.toFixed(0)} m)`,
+              desc: "Launch, shift, hang on. Straight-line tune shootout.",
+            },
+            {
+              id: "circuit" as const,
+              title: "Random circuit — 2 laps",
+              desc: "A new track every race: brake for corners, chase perfect exits, use the slipstream. Weather roulette.",
+            },
+          ]
+        ).map((m) => (
+          <button
+            key={m.id}
+            onClick={() => p.setRaceMode(m.id)}
+            className={`rounded border p-3 text-left transition-colors ${
+              p.raceMode === m.id
+                ? "border-s1 bg-s1/10"
+                : "border-grid bg-surface hover:border-axis"
+            }`}
+          >
+            <div className="text-sm font-bold">
+              {m.id === "drag" ? "🏁 " : "🌀 "}
+              {m.title}
+            </div>
+            <div className="text-xs text-muted">{m.desc}</div>
+          </button>
+        ))}
+      </div>
+
       <div className="flex flex-wrap items-center gap-3 rounded border border-grid bg-surface p-3">
         <div>
-          <div className="text-sm font-bold">Quarter mile — {QUARTER_MILE_M.toFixed(0)} m</div>
           <div className="text-xs text-muted">
             Your build: <span className="font-semibold text-s2">{p.peakHp.toFixed(0)} whp</span>
             {p.spec.turbo ? ` at ${p.wastegateKpa.toFixed(0)} kPa` : " (NA)"} · the tune you race
@@ -763,7 +931,7 @@ function SetupView(p: {
           </div>
         </div>
         <div className="ml-auto text-right text-xs text-muted">
-          Best ET ({p.spec.name.split("—")[0].trim()})
+          Best drag ET ({p.spec.name.split("—")[0].trim()})
           <div className="text-base font-bold text-s1">{fmtEt(p.bestEt)}</div>
         </div>
       </div>
@@ -928,6 +1096,9 @@ function SetupView(p: {
                   <span className="font-mono text-xs font-bold tracking-[0.2em] text-s1">
                     {e.code}
                   </span>
+                  <span title={e.mode === "circuit" ? "Random circuit" : "Drag ¼ mile"}>
+                    {e.mode === "circuit" ? "🌀" : "🏁"}
+                  </span>
                   <span className="truncate font-semibold">{e.hostName}</span>
                   <span className="hidden truncate text-xs text-ink2 sm:inline">
                     {e.engineName.split("—")[0].trim()} · {e.peakHp} whp
@@ -961,6 +1132,8 @@ function SetupView(p: {
 
       <div className="text-[11px] text-muted">
         Controls: hold <kbd className="rounded border border-grid px-1">Space</kbd> = throttle,{" "}
+        <kbd className="rounded border border-grid px-1">S</kbd> /{" "}
+        <kbd className="rounded border border-grid px-1">↓</kbd> = brake (circuit),{" "}
         <kbd className="rounded border border-grid px-1">E</kbd> /{" "}
         <kbd className="rounded border border-grid px-1">↑</kbd> = shift up,{" "}
         <kbd className="rounded border border-grid px-1">1–6</kbd> = grab a gear,{" "}
@@ -1008,9 +1181,38 @@ function LobbyView({
     setTimeout(() => setCopied(null), 1400);
   };
 
+  const mode = snap?.mode ?? "drag";
+
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
       <div className="flex flex-col items-center gap-1 rounded border border-grid bg-surface p-4">
+        {/* what we're racing — host can flip it, everyone sees it */}
+        <div className="mb-1 flex items-center gap-2">
+          {room.isHost ? (
+            (["drag", "circuit"] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => room.setMode(m).catch(() => {})}
+                className={`rounded border px-3 py-1 text-xs font-bold ${
+                  mode === m
+                    ? "border-s1 bg-s1/15 text-ink"
+                    : "border-grid text-muted hover:text-ink2"
+                }`}
+              >
+                {m === "drag" ? "🏁 Drag ¼ mile" : "🌀 Random circuit"}
+              </button>
+            ))
+          ) : (
+            <span className="rounded bg-raised px-3 py-1 text-xs font-bold text-ink2">
+              {mode === "drag" ? "🏁 Drag ¼ mile" : "🌀 Random circuit — 2 laps"}
+            </span>
+          )}
+        </div>
+        {mode === "circuit" && (
+          <div className="text-[11px] text-muted">
+            Track and weather are rolled at launch — nobody sees it first.
+          </div>
+        )}
         <div className="text-xs uppercase tracking-wider text-muted">Room code</div>
         <div className="flex items-center gap-3">
           <span className="font-mono text-4xl font-black tracking-[0.35em] text-s1">
@@ -1111,7 +1313,14 @@ function LobbyView({
           <motion.button
             whileTap={{ scale: 0.97 }}
             disabled={!allReady}
-            onClick={() => room.launch()}
+            onClick={() =>
+              room.launch(
+                4500,
+                mode === "circuit"
+                  ? { circuitSeed: (Math.random() * 2 ** 31) | 0, laps: CIRCUIT_LAPS }
+                  : {},
+              )
+            }
             className="rounded bg-s1 px-5 py-2.5 text-sm font-bold text-white disabled:opacity-40"
             title={allReady ? "Go!" : "Needs 2+ drivers, everyone ready"}
           >
@@ -1280,22 +1489,158 @@ function TrackView({
   );
 }
 
+/** one-lap track ribbon: corner bands, live car dots, next-corner callout */
+function CircuitTrackView({
+  t,
+  cir,
+  cs,
+  me,
+  opps,
+  slip,
+}: {
+  t: number;
+  cir: Circuit;
+  cs: CircuitState | null;
+  me: { d: number; v: number; label: string; blown: boolean };
+  opps: OppDisp[];
+  slip: boolean;
+}) {
+  const pos = me.d % cir.lapM;
+  const { c: next, dist } = nextCorner(cir, pos);
+  const needBrake =
+    t >= 0 &&
+    me.v > next.vMax &&
+    dist <= brakeDistance(me.v, next.vMax, cir.grip) * 1.25;
+  const lap = Math.min(cs?.lap ?? 0, cir.laps - 1);
+
+  return (
+    <div className="flex flex-col gap-2 rounded border border-grid bg-surface p-3">
+      {/* header */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+        <span className="text-sm font-bold">{cir.name}</span>
+        <span className="rounded bg-raised px-1.5 py-0.5 text-ink2">
+          {weatherLabel(cir.weather)}
+        </span>
+        <span className="text-muted">
+          {(cir.lapM / 1000).toFixed(1)} km · {cir.corners.length} turns
+        </span>
+        <span className="font-mono font-bold text-s1">
+          LAP {lap + 1}/{cir.laps}
+        </span>
+        {slip && (
+          <span className="animate-pulse rounded bg-s2/20 px-1.5 py-0.5 font-bold text-s2">
+            SLIPSTREAM
+          </span>
+        )}
+        <span className="ml-auto font-mono text-lg font-bold">
+          {t < 0 ? t.toFixed(1) : Math.min(t, CIRCUIT_TIMEOUT).toFixed(1)}
+        </span>
+      </div>
+
+      {/* the lap ribbon */}
+      <div className="relative h-16 overflow-hidden rounded border border-grid bg-page">
+        {cir.corners.map((c) => (
+          <div
+            key={c.n}
+            className="absolute inset-y-0 flex items-end justify-center pb-0.5 text-[9px] font-bold text-white/80"
+            style={{
+              left: `${(c.at / cir.lapM) * 100}%`,
+              width: `${(c.len / cir.lapM) * 100}%`,
+              background: cornerColor(c, cir.grip),
+              opacity: 0.55,
+            }}
+            title={`T${c.n} ${c.kind} — ${(c.vMax * 2.23694).toFixed(0)} mph`}
+          >
+            T{c.n}
+          </div>
+        ))}
+        {/* start/finish */}
+        <div
+          className="absolute inset-y-0 left-0 w-1.5 opacity-80"
+          style={{
+            backgroundImage: "repeating-conic-gradient(#fff 0% 25%, #111 0% 50%)",
+            backgroundSize: "5px 5px",
+          }}
+        />
+        {opps.map((o) => (
+          <div
+            key={o.id}
+            className="absolute top-2 h-3 w-3 -translate-x-1/2 rounded-full border border-black/50"
+            style={{
+              left: `${((o.d % cir.lapM) / cir.lapM) * 100}%`,
+              background: o.blown ? "#d03b3b" : o.color,
+            }}
+            title={`${o.label} — lap ${Math.floor(o.d / cir.lapM) + 1}`}
+          />
+        ))}
+        <div
+          className="absolute bottom-2 h-4 w-4 -translate-x-1/2 rounded-full border-2 border-white/70"
+          style={{
+            left: `${(pos / cir.lapM) * 100}%`,
+            background: me.blown ? "#d03b3b" : "#3987e5",
+          }}
+        />
+      </div>
+
+      {/* next corner + events */}
+      <div className="flex min-h-6 flex-wrap items-center gap-3 text-xs">
+        <span className="font-mono text-ink2">
+          → T{next.n} {next.kind} · {(next.vMax * 2.23694).toFixed(0)} mph ·{" "}
+          {dist.toFixed(0)} m
+        </span>
+        {needBrake && (
+          <span className="animate-pulse rounded bg-crit px-2 py-0.5 font-black text-white">
+            BRAKE!
+          </span>
+        )}
+        {cs?.event && t - cs.event.t < 2.2 && (
+          <motion.span
+            key={`${cs.event.kind}-${cs.event.t.toFixed(2)}`}
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            className={`rounded px-2 py-0.5 font-bold ${
+              cs.event.kind === "wide"
+                ? "bg-crit/20 text-crit"
+                : cs.event.kind === "perfect"
+                  ? "bg-good/20 text-good"
+                  : "bg-s1/20 text-s1"
+            }`}
+          >
+            {cs.event.text}
+          </motion.span>
+        )}
+        <span className="ml-auto font-mono text-muted">
+          last {cs?.lastLap ? `${cs.lastLap.toFixed(2)}s` : "—"} · best{" "}
+          {cs?.bestLap ? `${cs.bestLap.toFixed(2)}s` : "—"} ·{" "}
+          {cs?.perfect ?? 0} ✓
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function RaceHud({
   car,
   env,
+  circuit,
+  cs,
   autoShift,
   allowAutoShift,
   setAutoShift,
   onThrottle,
+  onBrake,
   onShift,
 }: {
   car: RaceCar;
   env: RaceEnv;
+  circuit: Circuit | null;
+  cs: CircuitState | null;
   autoShift: boolean;
   /** auto-shift is a solo assist — hidden entirely in multiplayer */
   allowAutoShift: boolean;
   setAutoShift: (b: boolean) => void;
   onThrottle: (v: boolean) => void;
+  onBrake: (v: boolean) => void;
   onShift: () => void;
 }) {
   const spec = env.spec;
@@ -1349,10 +1694,19 @@ function RaceHud({
             {boost.toFixed(0)} kPa
           </span>
         </div>
-        <div>
-          <span className="text-[10px] uppercase text-muted">dist </span>
-          <span className="text-lg font-bold text-ink2">{car.d.toFixed(0)} m</span>
-        </div>
+        {circuit ? (
+          <div>
+            <span className="text-[10px] uppercase text-muted">lap </span>
+            <span className="text-lg font-bold text-ink2">
+              {Math.min((cs?.lap ?? 0) + 1, circuit.laps)}/{circuit.laps}
+            </span>
+          </div>
+        ) : (
+          <div>
+            <span className="text-[10px] uppercase text-muted">dist </span>
+            <span className="text-lg font-bold text-ink2">{car.d.toFixed(0)} m</span>
+          </div>
+        )}
         <div className="min-w-24 flex-1">
           <div className="mb-0.5 text-[10px] uppercase text-muted">health</div>
           <div className="h-1.5 overflow-hidden rounded bg-page">
@@ -1378,6 +1732,22 @@ function RaceHud({
 
       {/* touch / mouse controls */}
       <div className="flex gap-2">
+        {circuit && (
+          <button
+            onPointerDown={(e) => {
+              e.preventDefault();
+              e.currentTarget.setPointerCapture(e.pointerId);
+              onBrake(true);
+            }}
+            onPointerUp={() => onBrake(false)}
+            onPointerCancel={() => onBrake(false)}
+            onContextMenu={(e) => e.preventDefault()}
+            style={{ touchAction: "none", WebkitTouchCallout: "none" }}
+            className="h-14 flex-1 select-none rounded bg-crit/80 text-sm font-black tracking-widest text-white active:bg-crit"
+          >
+            BRAKE (S)
+          </button>
+        )}
         <button
           onPointerDown={(e) => {
             e.preventDefault();
@@ -1423,6 +1793,9 @@ function RaceHud({
 function ResultsView({
   outcome,
   hud,
+  cs,
+  mode,
+  circuit,
   room,
   roomSnap,
   bestEt,
@@ -1432,6 +1805,9 @@ function ResultsView({
 }: {
   outcome: Outcome | null;
   hud: RaceCar | null;
+  cs: CircuitState | null;
+  mode: RaceMode;
+  circuit: Circuit | null;
   room: RaceRoom | null;
   roomSnap: RoomSnapshot | null;
   bestEt: number | null;
@@ -1439,6 +1815,7 @@ function ResultsView({
   onRematch: () => void;
   onLeave: () => void;
 }) {
+  const isCircuit = mode === "circuit";
   let rows: { name: string; res: Partial<RaceResult>; me: boolean }[] = [];
   let verdict = "";
 
@@ -1452,6 +1829,7 @@ function ResultsView({
           trapKph: outcome.ghost.trapKph,
           sixtyFt: outcome.ghost.sixtyFt,
           blown: outcome.ghost.blown,
+          bestLap: outcome.ghost.bestLap ?? null,
         },
         me: false,
       },
@@ -1507,14 +1885,30 @@ function ResultsView({
       >
         {verdict}
       </div>
+      {isCircuit && circuit && (
+        <div className="mb-2 text-center text-xs text-muted">
+          {circuit.name} · {weatherLabel(circuit.weather)} ·{" "}
+          {(circuit.lapM / 1000).toFixed(1)} km × {circuit.laps} laps
+          {cs ? ` · ${cs.perfect} perfect exit${cs.perfect === 1 ? "" : "s"}, ${cs.wideCount} off` : ""}
+        </div>
+      )}
       <table className="w-full text-sm">
         <thead>
           <tr className="text-left text-[10px] uppercase tracking-wider text-muted">
             <th className="w-6 py-1">#</th>
             <th>Driver</th>
-            <th>60 ft</th>
-            <th>ET</th>
-            <th>Trap</th>
+            {isCircuit ? (
+              <>
+                <th>Total</th>
+                <th>Best lap</th>
+              </>
+            ) : (
+              <>
+                <th>60 ft</th>
+                <th>ET</th>
+                <th>Trap</th>
+              </>
+            )}
           </tr>
         </thead>
         <tbody>
@@ -1526,18 +1920,27 @@ function ResultsView({
               <td className={`py-1.5 ${r.me ? "font-bold text-s1" : "text-ink2"}`}>
                 {r.name} {r.res.blown && "💥"}
               </td>
-              <td>{fmtT(r.res.sixtyFt)}</td>
-              <td className="font-bold">{fmtEt(r.res.et)}</td>
-              <td>
-                {r.res.trapKph && r.res.trapKph > 0
-                  ? `${(r.res.trapKph * 0.621371).toFixed(0)} mph`
-                  : "—"}
-              </td>
+              {isCircuit ? (
+                <>
+                  <td className="font-bold">{fmtEt(r.res.et)}</td>
+                  <td>{fmtT(r.res.bestLap ?? null)}</td>
+                </>
+              ) : (
+                <>
+                  <td>{fmtT(r.res.sixtyFt)}</td>
+                  <td className="font-bold">{fmtEt(r.res.et)}</td>
+                  <td>
+                    {r.res.trapKph && r.res.trapKph > 0
+                      ? `${(r.res.trapKph * 0.621371).toFixed(0)} mph`
+                      : "—"}
+                  </td>
+                </>
+              )}
             </tr>
           ))}
         </tbody>
       </table>
-      {bestEt !== null && (
+      {bestEt !== null && !isCircuit && (
         <div className="mt-2 text-center text-xs text-muted">
           Personal best on this engine: <span className="font-bold text-s1">{fmtEt(bestEt)}</span>
         </div>

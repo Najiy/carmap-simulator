@@ -76,6 +76,19 @@ export function createRaceCar(spec: EngineSpec, health = 100): RaceCar {
   };
 }
 
+export interface StepOpts {
+  /** brakes held — overrides throttle */
+  brake?: boolean;
+  /** finish-line distance; circuit mode passes Infinity and times itself */
+  finishD?: number;
+  /** aero-drag multiplier (slipstream) */
+  dragScale?: number;
+  /** grip multiplier for the traction cap (weather) */
+  tractionScale?: number;
+  /** braking decel in g (weather-scaled) */
+  brakeG?: number;
+}
+
 /**
  * One fixed physics step. Before t=0 the car is staged (clutch in): revving
  * spools the turbo but the car stays put. Deterministic — no randomness —
@@ -91,13 +104,19 @@ export function stepRaceCar(
   shiftUp: boolean,
   gearSelect: number | null = null,
   dt = RACE_STEP,
+  opts: StepOpts = {},
 ): void {
   const { spec, axes, maps, wastegateKpa } = env;
   car.t += dt;
   const green = car.t >= 0;
   const running = !car.blown;
-  const thr = running && throttleHeld ? 1 : 0;
+  const braking = (opts.brake ?? false) && green;
+  const thr = running && throttleHeld && !braking ? 1 : 0;
   car.throttle = thr;
+  const dragScale = opts.dragScale ?? 1;
+  const brakeForce = braking
+    ? GEARBOX.massKg * 9.81 * (opts.brakeG ?? 1.1)
+    : 0;
 
   // throttle → manifold pressure with turbo spool lag (same as live sim)
   const naPortion = 24 + thr * (98 - 24);
@@ -148,7 +167,7 @@ export function stepRaceCar(
     car.d = 0;
   } else if (neutral) {
     // nothing drives the wheels — coast and free-rev
-    const drag = 0.42 * car.v ** 2 + 165;
+    const drag = (0.42 * car.v ** 2 + 165) * dragScale + brakeForce;
     car.v = Math.max(0, car.v - (drag / GEARBOX.massKg) * dt);
     car.d += car.v * dt;
     const target = running
@@ -158,9 +177,10 @@ export function stepRaceCar(
   } else {
     const force =
       torque > 0 ? (torque * ratio * GEARBOX.driveline) / GEARBOX.wheelRadiusM : 0;
-    const traction = 1.12 * GEARBOX.massKg * 9.81; // drag-radial grip cap
+    const traction =
+      1.12 * GEARBOX.massKg * 9.81 * (opts.tractionScale ?? 1); // grip cap
     const drive = Math.min(force, traction);
-    const drag = 0.42 * car.v ** 2 + 165;
+    const drag = (0.42 * car.v ** 2 + 165) * dragScale + brakeForce;
     const accel = (drive - (car.v > 0 ? drag : Math.min(drag, drive))) / GEARBOX.massKg;
     car.v = Math.max(0, car.v + accel * dt);
     car.d += car.v * dt;
@@ -199,10 +219,11 @@ export function stepRaceCar(
   }
 
   // timing milestones
+  const finishD = opts.finishD ?? QUARTER_MILE_M;
   if (car.sixtyFt === null && car.d >= SIXTY_FEET_M) car.sixtyFt = car.t;
-  if (!car.finished && car.d >= QUARTER_MILE_M) {
+  if (!car.finished && car.d >= finishD) {
     car.finished = true;
-    const overshoot = car.d - QUARTER_MILE_M;
+    const overshoot = car.d - finishD;
     car.et = car.t - (car.v > 0 ? overshoot / car.v : 0);
     car.trapKph = car.v * 3.6;
   }

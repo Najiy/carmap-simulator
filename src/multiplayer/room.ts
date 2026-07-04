@@ -47,9 +47,12 @@ export interface RaceResult {
   trapKph: number;
   sixtyFt: number | null;
   blown: boolean;
+  /** circuit mode only */
+  bestLap?: number | null;
 }
 
 export type RoomStatus = "lobby" | "racing";
+export type RoomMode = "drag" | "circuit";
 
 export const MAX_PLAYERS = 8;
 
@@ -57,6 +60,11 @@ export interface RoomSnapshot {
   code: string;
   hostId: string;
   status: RoomStatus;
+  /** what we're racing — the host picks, everyone follows */
+  mode: RoomMode;
+  /** shared seed so every client builds the identical random circuit */
+  circuitSeed: number | null;
+  laps: number;
   /** server-clock ms of the green light (set when the host launches) */
   greenAt: number | null;
   players: Record<string, RoomPlayer>;
@@ -93,6 +101,7 @@ export interface LobbyEntry {
   players: number;
   hasPass: boolean;
   status: RoomStatus;
+  mode: RoomMode;
   createdAt: number;
 }
 
@@ -135,7 +144,7 @@ export class RaceRoom {
 
   static async host(
     me: RoomPlayer,
-    opts: { pass?: string } = {},
+    opts: { pass?: string; mode?: RoomMode } = {},
     id = defaultId(),
   ): Promise<RaceRoom> {
     const db = getDatabase(app);
@@ -152,6 +161,9 @@ export class RaceRoom {
       createdAt: serverTimestamp(),
       hostId: id,
       status: "lobby",
+      mode: opts.mode ?? "drag",
+      circuitSeed: null,
+      laps: 2,
       greenAt: null,
       passHash: pass ? await hashPass(code, pass) : null,
       players: { [id]: me },
@@ -168,6 +180,7 @@ export class RaceRoom {
       players: 1,
       hasPass: !!pass,
       status: "lobby",
+      mode: opts.mode ?? "drag",
     });
     onDisconnect(lobbyRef).remove();
     room.listen();
@@ -230,6 +243,9 @@ export class RaceRoom {
         code: this.code,
         hostId: v.hostId,
         status: v.status ?? "lobby",
+        mode: v.mode === "circuit" ? "circuit" : "drag",
+        circuitSeed: typeof v.circuitSeed === "number" ? v.circuitSeed : null,
+        laps: typeof v.laps === "number" ? v.laps : 2,
         greenAt: typeof v.greenAt === "number" ? v.greenAt : null,
         players: v.players ?? {},
         live: v.live ?? {},
@@ -241,6 +257,7 @@ export class RaceRoom {
         const sig = [
           Object.keys(this.snapshot.players).length,
           this.snapshot.status,
+          this.snapshot.mode,
           me?.name,
           me?.engineName,
           me?.peakHp,
@@ -250,6 +267,7 @@ export class RaceRoom {
           update(ref(getDatabase(app), `lobby/${this.code}`), {
             players: Object.keys(this.snapshot.players).length,
             status: this.snapshot.status,
+            mode: this.snapshot.mode,
             hostName: me?.name ?? "?",
             engineName: me?.engineName ?? "?",
             peakHp: me?.peakHp ?? 0,
@@ -280,6 +298,7 @@ export class RaceRoom {
             players: e.players ?? 1,
             hasPass: !!e.hasPass,
             status: (e.status ?? "lobby") as RoomStatus,
+            mode: (e.mode === "circuit" ? "circuit" : "drag") as RoomMode,
             createdAt: e.createdAt ?? 0,
           }))
           .filter((e) => now - e.createdAt < 2 * 3600_000)
@@ -336,12 +355,28 @@ export class RaceRoom {
     });
   }
 
+  /** host only: flip the room between drag and circuit while in the lobby */
+  async setMode(mode: RoomMode): Promise<void> {
+    if (!this.isHost) return;
+    const updates: Record<string, unknown> = { mode };
+    // a mode change is a new contract — everyone re-readies
+    for (const id of Object.keys(this.snapshot?.players ?? {})) {
+      updates[`players/${id}/ready`] = false;
+    }
+    await update(this.roomRef, updates);
+  }
+
   /** host only: schedule the green light a few seconds out on the server clock */
-  async launch(leadInMs = 4500): Promise<void> {
+  async launch(
+    leadInMs = 4500,
+    opts: { circuitSeed?: number; laps?: number } = {},
+  ): Promise<void> {
     if (!this.isHost) return;
     await update(this.roomRef, {
       status: "racing",
       greenAt: this.serverNow() + leadInMs,
+      circuitSeed: opts.circuitSeed ?? null,
+      laps: opts.laps ?? 2,
       live: null,
       results: null,
     });
