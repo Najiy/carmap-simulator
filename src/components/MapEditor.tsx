@@ -46,6 +46,8 @@ export default function MapEditor(props: MapEditorProps) {
   const [sel, setSel] = useState<Sel | null>({ ar: 8, ac: 4, fr: 8, fc: 4 });
   const [buffer, setBuffer] = useState("");
   const [showLog, setShowLog] = useState(false);
+  // touch screens have no shift-click: this makes the next tap extend
+  const [extendMode, setExtendMode] = useState(false);
   const dragging = useRef(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const trace = useCellTrace();
@@ -195,6 +197,12 @@ export default function MapEditor(props: MapEditorProps) {
         <ToolButton onClick={() => applyToSel((v) => v * 1.05)}>
           ×1.05
         </ToolButton>
+        <ToolButton
+          active={extendMode}
+          onClick={() => setExtendMode((m) => !m)}
+        >
+          ⛶ Extend
+        </ToolButton>
         <ToolButton onClick={smooth}>Smooth</ToolButton>
         <ToolButton onClick={() => interpolate("h")}>Interp →</ToolButton>
         <ToolButton onClick={() => interpolate("v")}>Interp ↓</ToolButton>
@@ -263,8 +271,9 @@ export default function MapEditor(props: MapEditorProps) {
                 wrapRef.current?.focus();
                 dragging.current = true;
                 commitBuffer();
+                const extend = shift || extendMode;
                 setSel((s) =>
-                  shift && s
+                  extend && s
                     ? { ...s, fr: li2, fc: ri }
                     : { ar: li2, ac: ri, fr: li2, fc: ri },
                 );

@@ -1,5 +1,3 @@
-import { isUnlocked } from "../engine/defaults";
-
 const sections = [
   {
     title: "What you're looking at",
@@ -168,13 +166,11 @@ const sections = [
           Only then chase timing: add advance cell-by-cell at load until knock
           appears, back off 2°, and compare dyno ghosts to see the gains.
         </li>
-        {isUnlocked() && (
-          <li>
-            Stuck? Load the <b>Pro tune</b> preset and study what finished
-            maps look like — then reload the base map and get yours to match
-            its dyno curve.
-          </li>
-        )}
+        <li>
+          Stuck? Load the <b>Pro tune</b> preset and study what finished
+          maps look like — then reload the base map and get yours to match
+          its dyno curve.
+        </li>
       </ol>
     ),
   },

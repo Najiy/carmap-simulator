@@ -1204,7 +1204,7 @@ function Lane({
         {label}
         {!compact && v !== undefined && v > 0.5 && (
           <span className="ml-2 text-ink2">
-            {(v * 3.6).toFixed(0)} km/h
+            {(v * 2.23694).toFixed(0)} mph
             {gear !== undefined ? ` · ${gear < 0 ? "N" : gear + 1}` : ""}
           </span>
         )}
@@ -1340,8 +1340,8 @@ function RaceHud({
         </div>
         <div>
           <span className="text-[10px] uppercase text-muted">speed </span>
-          <span className="text-2xl font-black text-ink">{(car.v * 3.6).toFixed(0)}</span>
-          <span className="text-xs text-muted"> km/h</span>
+          <span className="text-2xl font-black text-ink">{(car.v * 2.23694).toFixed(0)}</span>
+          <span className="text-xs text-muted"> mph</span>
         </div>
         <div>
           <span className="text-[10px] uppercase text-muted">boost </span>
@@ -1381,11 +1381,15 @@ function RaceHud({
         <button
           onPointerDown={(e) => {
             e.preventDefault();
+            // keep the pointer bound to this button so finger drift during
+            // the hold can't fire pointerleave and drop the throttle
+            e.currentTarget.setPointerCapture(e.pointerId);
             onThrottle(true);
           }}
           onPointerUp={() => onThrottle(false)}
-          onPointerLeave={() => onThrottle(false)}
           onPointerCancel={() => onThrottle(false)}
+          onContextMenu={(e) => e.preventDefault()}
+          style={{ touchAction: "none", WebkitTouchCallout: "none" }}
           className={`h-14 flex-1 select-none rounded text-sm font-black tracking-widest ${
             car.throttle > 0 ? "bg-s2 text-white" : "bg-raised text-ink2"
           }`}
@@ -1398,6 +1402,8 @@ function RaceHud({
             onShift();
           }}
           disabled={autoShift}
+          onContextMenu={(e) => e.preventDefault()}
+          style={{ touchAction: "none", WebkitTouchCallout: "none" }}
           className={`h-14 w-36 select-none rounded text-sm font-black tracking-widest disabled:opacity-30 ${
             wantShift ? "bg-warn text-black" : "bg-raised text-ink2"
           }`}
@@ -1524,7 +1530,7 @@ function ResultsView({
               <td className="font-bold">{fmtEt(r.res.et)}</td>
               <td>
                 {r.res.trapKph && r.res.trapKph > 0
-                  ? `${r.res.trapKph.toFixed(0)} km/h`
+                  ? `${(r.res.trapKph * 0.621371).toFixed(0)} mph`
                   : "—"}
               </td>
             </tr>

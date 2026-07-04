@@ -19,10 +19,16 @@ export default function DynoChart({
   runs,
   current,
   maxRpm,
+  animate = true,
+  pinnedIds = [],
 }: {
   runs: DynoRun[];
   current: DynoRun | null;
   maxRpm: number;
+  /** replay the left-to-right sweep (fresh pull); false when just browsing */
+  animate?: boolean;
+  /** ghost runs the user pinned — drawn brighter with a 📌 marker */
+  pinnedIds?: number[];
 }) {
   const [hoverI, setHoverI] = useState<number | null>(null);
   const X1 = Math.ceil((maxRpm + 200) / 500) * 500;
@@ -113,13 +119,40 @@ export default function DynoChart({
           Nm/hp
         </text>
 
-        {/* ghost runs */}
-        {runs.map((run) => (
-          <g key={run.id} opacity="0.28">
-            <path d={path(run.points, (p) => p.torque, y)} fill="none" stroke={COL_TQ} strokeWidth="1.5" />
-            <path d={path(run.points, (p) => p.hp, y)} fill="none" stroke={COL_HP} strokeWidth="1.5" />
-          </g>
-        ))}
+        {/* ghost runs — pinned ones brighter, with a 📌 at their power peak */}
+        {runs.map((run) => {
+          const isPinned = pinnedIds.includes(run.id);
+          return (
+            <g key={run.id} opacity={isPinned ? 0.6 : 0.28}>
+              <path
+                d={path(run.points, (p) => p.torque, y)}
+                fill="none"
+                stroke={COL_TQ}
+                strokeWidth="1.5"
+                strokeDasharray={isPinned ? undefined : "5 4"}
+              />
+              <path
+                d={path(run.points, (p) => p.hp, y)}
+                fill="none"
+                stroke={COL_HP}
+                strokeWidth="1.5"
+                strokeDasharray={isPinned ? undefined : "5 4"}
+              />
+              {isPinned && (
+                <text
+                  x={x(run.peakHp.rpm)}
+                  y={y(run.peakHp.v) - 6}
+                  textAnchor="middle"
+                  fontSize="9"
+                  fill="#c98500"
+                  className="tabular"
+                >
+                  📌 {run.peakHp.v.toFixed(0)}
+                </text>
+              )}
+            </g>
+          );
+        })}
 
         {/* current run — revealed left-to-right in sync with the pull */}
         {current &&
@@ -137,9 +170,9 @@ export default function DynoChart({
                       x={xStart - 3}
                       y={0}
                       height={H + AFR_H}
-                      initial={{ width: 0 }}
+                      initial={{ width: animate ? 0 : xEnd - xStart + 6 }}
                       animate={{ width: xEnd - xStart + 6 }}
-                      transition={{ duration: DRAW_S, ease: "linear" }}
+                      transition={{ duration: animate ? DRAW_S : 0, ease: "linear" }}
                     />
                   </clipPath>
                 </defs>
@@ -171,20 +204,22 @@ export default function DynoChart({
                     ))}
                 </g>
                 {/* roller sweep cursor */}
-                <motion.line
-                  y1={M.t}
-                  y2={H + AFR_H - 16}
-                  stroke="#c3c2b7"
-                  strokeWidth="1"
-                  strokeDasharray="3 3"
-                  initial={{ x1: xStart, x2: xStart, opacity: 0.7 }}
-                  animate={{ x1: xEnd, x2: xEnd, opacity: 0 }}
-                  transition={{
-                    duration: DRAW_S,
-                    ease: "linear",
-                    opacity: { delay: DRAW_S, duration: 0.3 },
-                  }}
-                />
+                {animate && (
+                  <motion.line
+                    y1={M.t}
+                    y2={H + AFR_H - 16}
+                    stroke="#c3c2b7"
+                    strokeWidth="1"
+                    strokeDasharray="3 3"
+                    initial={{ x1: xStart, x2: xStart, opacity: 0.7 }}
+                    animate={{ x1: xEnd, x2: xEnd, opacity: 0 }}
+                    transition={{
+                      duration: DRAW_S,
+                      ease: "linear",
+                      opacity: { delay: DRAW_S, duration: 0.3 },
+                    }}
+                  />
+                )}
                 {/* peak labels appear as the sweep passes them */}
                 <motion.text
                   x={x(current.peakTq.rpm)}
@@ -193,9 +228,9 @@ export default function DynoChart({
                   fontSize="10"
                   fill="#c3c2b7"
                   className="tabular"
-                  initial={{ opacity: 0 }}
+                  initial={{ opacity: animate ? 0 : 1 }}
                   animate={{ opacity: 1 }}
-                  transition={{ delay: DRAW_S * frac(current.peakTq.rpm) + 0.15 }}
+                  transition={{ delay: animate ? DRAW_S * frac(current.peakTq.rpm) + 0.15 : 0 }}
                 >
                   {current.peakTq.v.toFixed(0)} Nm
                 </motion.text>
@@ -206,9 +241,9 @@ export default function DynoChart({
                   fontSize="10"
                   fill="#c3c2b7"
                   className="tabular"
-                  initial={{ opacity: 0 }}
+                  initial={{ opacity: animate ? 0 : 1 }}
                   animate={{ opacity: 1 }}
-                  transition={{ delay: DRAW_S * frac(current.peakHp.rpm) + 0.15 }}
+                  transition={{ delay: animate ? DRAW_S * frac(current.peakHp.rpm) + 0.15 : 0 }}
                 >
                   {current.peakHp.v.toFixed(0)} hp
                 </motion.text>

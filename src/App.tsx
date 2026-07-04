@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { buildAxes, clamp, cloneGrid } from "./engine/axes";
 import { ENGINES, getEngine } from "./engine/engines";
-import { baseMaps, isUnlocked, type Maps } from "./engine/defaults";
+import { baseMaps, type Maps } from "./engine/defaults";
 import { engine } from "./engine/store";
 import { useTuneStore, validMaps } from "./store/tuneStore";
 import PresetMenu from "./components/PresetMenu";
@@ -16,7 +16,9 @@ import FailureOverlay from "./components/FailureOverlay";
 import RacePanel from "./components/RacePanel";
 import AcademyPanel from "./components/AcademyPanel";
 import DriverName from "./components/DriverName";
+import MobileDock from "./components/MobileDock";
 import { useGameStore } from "./store/gameStore";
+import { useMediaQuery } from "./lib/useMediaQuery";
 import type { Exercise } from "./engine/exercises";
 
 type Tab = "fuel" | "ign" | "afr" | "dyno" | "race" | "learn" | "guide";
@@ -54,11 +56,6 @@ const SECTIONS: {
 
 const sectionOf = (t: Tab): Section =>
   SECTIONS.find((s) => s.tabs.some((x) => x.id === t))!.id;
-
-/** engines hidden behind the ?unlocked=true flag (the 450 bhp build) */
-const LOCKED_ENGINES = new Set(["stmk45bt"]);
-const selectableEngines = () =>
-  isUnlocked() ? ENGINES : ENGINES.filter((e) => !LOCKED_ENGINES.has(e.id));
 
 /** invite links: ?join=drag-XKR42 lands the guest straight in the lobby */
 const pendingJoinCode = (() => {
@@ -107,14 +104,6 @@ export default function App() {
     engine.start();
     return () => engine.stop();
   }, []);
-
-  // don't leave a locked engine selected (e.g. persisted from an unlocked
-  // session) when the ?unlocked flag isn't set
-  useEffect(() => {
-    if (!isUnlocked() && LOCKED_ENGINES.has(engineId)) {
-      setEngineId(ENGINES[0].id);
-    }
-  }, [engineId, setEngineId]);
 
   // configure the sim on engine swap (and first mount); afterwards just feed
   // it the latest maps without resetting hardware
@@ -201,30 +190,34 @@ export default function App() {
     [maps, change, axes, spec],
   );
 
+  const isDesktop = useMediaQuery("(min-width: 1024px)");
+
   return (
-    <div className="flex h-full flex-col overflow-hidden">
+    <div className="flex h-dvh flex-col overflow-hidden">
       <FailureOverlay />
 
       {/* header */}
-      <header className="flex flex-wrap items-center gap-3 border-b border-grid bg-surface px-4 py-2">
+      <header className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-grid bg-surface px-2 py-2 sm:px-4">
         <span className="text-sm font-bold tracking-wide">
           BOB'S <span className="text-s1">REAL</span> DYNOS
         </span>
         <select
           value={engineId}
           onChange={(e) => swapEngine(e.target.value)}
-          className="rounded border border-grid bg-raised px-2 py-1 text-xs font-semibold text-ink"
+          className="max-w-[52vw] rounded border border-grid bg-raised px-2 py-1 text-xs font-semibold text-ink sm:max-w-none"
           title={spec.desc}
         >
-          {selectableEngines().map((e) => (
+          {ENGINES.map((e) => (
             <option key={e.id} value={e.id}>
               {e.name}
             </option>
           ))}
         </select>
-        <span className="hidden text-xs text-muted lg:inline">{spec.desc}</span>
+        <span className="hidden text-xs text-muted xl:inline">{spec.desc}</span>
         <div className="ml-auto flex items-center gap-2">
-          <DriverName />
+          <span className="hidden sm:block">
+            <DriverName />
+          </span>
           <button
             onClick={undo}
             className="rounded border border-grid px-2 py-1 text-xs text-ink2 hover:text-ink"
@@ -240,7 +233,7 @@ export default function App() {
         {/* main: section tabs + sub-tabs + content */}
         <main className="flex min-w-0 flex-1 flex-col">
           <nav className="border-b border-grid bg-surface">
-            <div className="flex gap-1 px-3">
+            <div className="flex gap-1 overflow-x-auto px-3">
               {SECTIONS.map((s) => (
                 <button
                   key={s.id}
@@ -260,7 +253,7 @@ export default function App() {
               ))}
             </div>
             {activeSection.tabs.length > 1 && (
-              <div className="flex gap-1 border-t border-grid bg-page/40 px-3">
+              <div className="flex gap-1 overflow-x-auto border-t border-grid bg-page/40 px-3">
                 {activeSection.tabs.map((t) => (
                   <button
                     key={t.id}
@@ -369,13 +362,18 @@ export default function App() {
           </div>
         </main>
 
-        {/* sidebar: gauges, controls, warnings */}
-        <aside className="flex w-[330px] shrink-0 flex-col overflow-y-auto border-l border-grid bg-surface">
-          <Gauges spec={spec} />
-          <Controls spec={spec} />
-          <StatusBar />
-        </aside>
+        {/* desktop sidebar: gauges, controls, warnings */}
+        {isDesktop && (
+          <aside className="flex w-[330px] shrink-0 flex-col overflow-y-auto border-l border-grid bg-surface">
+            <Gauges spec={spec} />
+            <Controls spec={spec} />
+            <StatusBar />
+          </aside>
+        )}
       </div>
+
+      {/* phone: live telemetry strip + slide-up drawer */}
+      {!isDesktop && <MobileDock spec={spec} />}
     </div>
   );
 }

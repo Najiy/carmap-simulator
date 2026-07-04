@@ -56,7 +56,9 @@ export function baseMaps(spec: EngineSpec, axes: Axes): Maps {
         mbtSpark(r, l) - 4,
         knockLimit(spec, r, l, defaultAfrTarget(l)) - 6,
       );
-      return round1(Math.max(4, safe));
+      // strained tunes legitimately run near-zero advance at high load —
+      // flooring above the knock limit would make the factory map knock
+      return round1(Math.max(0, safe));
     }),
     afrTarget: makeGrid(axes, (l) => round1(defaultAfrTarget(l))),
   };
@@ -78,7 +80,7 @@ export function richSafeMaps(spec: EngineSpec, axes: Axes): Maps {
       mbtSpark(r, l) - 6,
       knockLimit(spec, r, l, 11.5) - 8,
     );
-    return round1(Math.max(4, safe));
+    return round1(Math.max(0, safe));
   });
   return m;
 }
@@ -92,7 +94,7 @@ export function expertMaps(spec: EngineSpec, axes: Axes): Maps {
     ign: makeGrid(axes, (l, r) => {
       const mbt = mbtSpark(r, l);
       const kl = knockLimit(spec, r, l, defaultAfrTarget(l));
-      return round1(Math.max(4, Math.min(mbt, kl - 2)));
+      return round1(Math.max(0, Math.min(mbt, kl - 2)));
     }),
     afrTarget: makeGrid(axes, (l) => round1(defaultAfrTarget(l))),
   };
@@ -127,7 +129,7 @@ export function optimalMaps(spec: EngineSpec, axes: Axes, margin = 0.6): Maps {
     ign: makeGrid(axes, (l, r) =>
       round1(
         Math.max(
-          4,
+          0,
           Math.min(mbtSpark(r, l), knockLimit(spec, r, l, afrFor(l)) - margin),
         ),
       ),
@@ -179,10 +181,6 @@ export function popsBangsMaps(spec: EngineSpec, axes: Axes): Maps {
   };
 }
 
-/** Pro-tune reference maps are hidden unless the URL carries ?unlocked=true */
-export const isUnlocked = () =>
-  new URLSearchParams(window.location.search).get("unlocked") === "true";
-
 export const PRESETS: {
   id: string;
   label: string;
@@ -201,7 +199,5 @@ export const PRESETS: {
     engineId: "stmk45bt",
     wastegateKpa: 256,
   },
-  ...(isUnlocked()
-    ? [{ id: "expert", label: "Pro tune (reference)", make: expertMaps }]
-    : []),
+  { id: "expert", label: "Pro tune (reference)", make: expertMaps },
 ];

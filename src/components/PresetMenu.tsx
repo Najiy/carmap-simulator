@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import type { Axes } from "../engine/axes";
 import type { EngineSpec } from "../engine/engines";
 import { PRESETS, type Maps } from "../engine/defaults";
 import { engine } from "../engine/store";
 import { useTuneStore, validMaps } from "../store/tuneStore";
+import { downloadCar, importCar } from "../lib/transfer";
 
 export default function PresetMenu({
   spec,
@@ -19,9 +20,20 @@ export default function PresetMenu({
 }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
+  const [notice, setNotice] = useState<{ ok: boolean; message: string } | null>(
+    null,
+  );
+  const fileRef = useRef<HTMLInputElement>(null);
   const userPresets = useTuneStore((s) => s.userPresets);
   const savePreset = useTuneStore((s) => s.savePreset);
   const deletePreset = useTuneStore((s) => s.deletePreset);
+
+  const onImportFile = async (file: File | undefined) => {
+    if (!file) return;
+    const result = importCar(await file.text());
+    setNotice(result);
+    if (result.ok) setTimeout(() => setOpen(false), 1600);
+  };
 
   const mine = userPresets.filter((p) => p.engineId === spec.id);
 
@@ -136,6 +148,50 @@ export default function PresetMenu({
                   💾 Save
                 </button>
               </div>
+
+              {/* move the whole car between devices */}
+              <div className="mt-2 flex gap-1 border-t border-grid pt-2">
+                <button
+                  onClick={() => {
+                    downloadCar(spec.id, maps);
+                    setNotice({ ok: true, message: "Car file downloaded." });
+                  }}
+                  className="flex-1 rounded border border-grid px-2 py-1.5 text-xs text-ink2 hover:border-axis hover:text-ink"
+                >
+                  ⇪ Export car
+                </button>
+                <button
+                  onClick={() => fileRef.current?.click()}
+                  className="flex-1 rounded border border-grid px-2 py-1.5 text-xs text-ink2 hover:border-axis hover:text-ink"
+                >
+                  ⇩ Import car…
+                </button>
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept="application/json,.json"
+                  className="hidden"
+                  onChange={(e) => {
+                    void onImportFile(e.target.files?.[0]);
+                    e.target.value = "";
+                  }}
+                />
+              </div>
+              <p className="px-1 pt-1 text-[10px] leading-snug text-muted">
+                A car file bundles the engine, its current tune, your saved
+                presets and drag-strip PB — import it on any device.
+              </p>
+              {notice && (
+                <div
+                  className={`mt-1 rounded px-2 py-1 text-[11px] ${
+                    notice.ok
+                      ? "bg-good/15 text-good"
+                      : "bg-crit/15 text-crit"
+                  }`}
+                >
+                  {notice.message}
+                </div>
+              )}
             </motion.div>
           </>
         )}
