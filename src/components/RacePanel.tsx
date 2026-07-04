@@ -26,19 +26,19 @@ import {
 import { useGameStore } from "../store/gameStore";
 import {
   brakeDistance,
-  CIRCUIT_LAPS,
-  CIRCUIT_TIMEOUT,
-  circuitOpts,
   cornerColor,
-  createCircuitState,
-  generateCircuit,
+  createSprintState,
+  generateSprint,
   nextCorner,
-  simulateCircuitGhost,
-  stepCircuit,
+  projectedEntry,
+  simulateSprintGhost,
+  SPRINT_TIMEOUT,
+  sprintOpts,
+  stepSprint,
   weatherLabel,
-  type Circuit,
-  type CircuitState,
   type RaceMode,
+  type Sprint,
+  type SprintState,
 } from "../engine/circuit";
 import {
   friendlyDbError,
@@ -54,7 +54,7 @@ type Phase = "setup" | "lobby" | "armed" | "done";
 /** what this race actually is — fixed at stage/green, read by runner + views */
 interface RaceCfg {
   mode: RaceMode;
-  circuit: Circuit | null;
+  sprint: Sprint | null;
 }
 
 const newSeed = () => (Math.random() * 2 ** 31) | 0;
@@ -83,7 +83,7 @@ const OPP_COLORS = [
 interface SoloOutcome {
   kind: "solo";
   me: RaceResult;
-  ghost: GhostResult & { bestLap?: number | null };
+  ghost: GhostResult;
   aiLabel: string;
 }
 interface MpOutcome {
@@ -164,7 +164,7 @@ export default function RacePanel({
   const [aiLevel, setAiLevel] = useState<AiLevel>("street");
   const [raceMode, setRaceMode] = useState<RaceMode>("drag");
   const [hud, setHud] = useState<RaceCar | null>(null);
-  const [circHud, setCircHud] = useState<CircuitState | null>(null);
+  const [sprintHud, setSprintHud] = useState<SprintState | null>(null);
   const [slip, setSlip] = useState(false);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [roomSnap, setRoomSnap] = useState<RoomSnapshot | null>(
@@ -179,7 +179,7 @@ export default function RacePanel({
 
   const envRef = useRef<RaceEnv | null>(null);
   const ghostRef = useRef<GhostResult | null>(null);
-  const raceCfgRef = useRef<RaceCfg>({ mode: "drag", circuit: null });
+  const raceCfgRef = useRef<RaceCfg>({ mode: "drag", sprint: null });
   const roomRef = useRef<RaceRoom | null>(activeRoom);
   const unsubRoomRef = useRef<(() => void) | null>(null);
   const greenAtPerfRef = useRef(0);
@@ -234,17 +234,17 @@ export default function RacePanel({
     engineSound.ensure();
     envRef.current = buildEnv();
     const ai = aiEnv(aiLevel, spec, axes);
-    if (raceMode === "circuit") {
-      const circuit = generateCircuit(newSeed());
-      raceCfgRef.current = { mode: "circuit", circuit };
-      ghostRef.current = simulateCircuitGhost(
+    if (raceMode === "sprint") {
+      const sprint = generateSprint(newSeed());
+      raceCfgRef.current = { mode: "sprint", sprint };
+      ghostRef.current = simulateSprintGhost(
         ai.env,
-        circuit,
+        sprint,
         aiLevel,
         ai.throttleFrom,
       );
     } else {
-      raceCfgRef.current = { mode: "drag", circuit: null };
+      raceCfgRef.current = { mode: "drag", sprint: null };
       ghostRef.current = simulateGhost(ai.env, ai.throttleFrom);
     }
     greenAtPerfRef.current = performance.now() + (STAGE_S + 0.4) * 1000;
@@ -294,12 +294,9 @@ export default function RacePanel({
         // lock the tune in NOW — whatever you dialled in while waiting races
         envRef.current = buildEnvRef.current();
         raceCfgRef.current =
-          s.mode === "circuit"
-            ? {
-                mode: "circuit",
-                circuit: generateCircuit(s.circuitSeed ?? 1, s.laps),
-              }
-            : { mode: "drag", circuit: null };
+          s.mode === "sprint"
+            ? { mode: "sprint", sprint: generateSprint(s.circuitSeed ?? 1) }
+            : { mode: "drag", sprint: null };
         greenAtPerfRef.current =
           performance.now() + (s.greenAt - room.serverNow());
         throttleRef.current = false;
@@ -324,14 +321,11 @@ export default function RacePanel({
     const s = room.current;
     if (s?.status === "racing" && s.greenAt !== null) {
       const raceClock = (room.serverNow() - s.greenAt) / 1000;
-      const timeoutS = s.mode === "circuit" ? CIRCUIT_TIMEOUT : RACE_TIMEOUT;
+      const timeoutS = s.mode === "sprint" ? SPRINT_TIMEOUT : RACE_TIMEOUT;
       raceCfgRef.current =
-        s.mode === "circuit"
-          ? {
-              mode: "circuit",
-              circuit: generateCircuit(s.circuitSeed ?? 1, s.laps),
-            }
-          : { mode: "drag", circuit: null };
+        s.mode === "sprint"
+          ? { mode: "sprint", sprint: generateSprint(s.circuitSeed ?? 1) }
+          : { mode: "drag", sprint: null };
       if (s.results[room.myId] || raceClock >= timeoutS) {
         setOutcome({ kind: "mp" });
         setPhase("done");
@@ -452,10 +446,10 @@ export default function RacePanel({
 
     engine.stop(); // race owns the audio + the crank now
     const cfg = raceCfgRef.current;
-    const circuit = cfg.mode === "circuit" ? cfg.circuit : null;
-    const timeoutS = circuit ? CIRCUIT_TIMEOUT : RACE_TIMEOUT;
+    const sprint = cfg.mode === "sprint" ? cfg.sprint : null;
+    const timeoutS = sprint ? SPRINT_TIMEOUT : RACE_TIMEOUT;
     const car = createRaceCar(env.spec, engine.getSnapshot().health);
-    const cs = createCircuitState();
+    const ss = createSprintState();
     car.t = (performance.now() - greenAtPerfRef.current) / 1000;
 
     let raf = 0;
@@ -494,10 +488,10 @@ export default function RacePanel({
       // allow big catch-up chunks: background tabs throttle timers to ~1 Hz
       acc += Math.min(2.5, (now - last) / 1000);
       last = now;
-      // slipstream only matters on circuits — held for the whole frame
-      const slipNow = circuit ? inSlipstream() : false;
-      const stepOpts = circuit
-        ? { ...circuitOpts(circuit, slipNow), brake: brakeRef.current }
+      // slipstream only matters on sprints — held for the whole frame
+      const slipNow = sprint ? inSlipstream() : false;
+      const stepOpts = sprint
+        ? { ...sprintOpts(sprint, slipNow), brake: brakeRef.current }
         : undefined;
       let guard = 0;
       while (acc >= RACE_STEP && guard++ < 400) {
@@ -539,7 +533,7 @@ export default function RacePanel({
         } else if (
           autoShiftRef.current &&
           !roomRef.current &&
-          circuit !== null &&
+          sprint !== null &&
           car.t >= 0 &&
           car.shiftT <= 0 &&
           car.gear > 0 &&
@@ -556,7 +550,7 @@ export default function RacePanel({
           if (rpmAfter < env.spec.revLimit * 0.9) gearSel = car.gear - 1;
         }
         stepRaceCar(car, env, throttleRef.current, shift, gearSel, RACE_STEP, stepOpts);
-        if (circuit) stepCircuit(car, cs, circuit);
+        if (sprint) stepSprint(car, ss, sprint);
       }
 
       // damage is real: it carries into the engine you tune
@@ -607,15 +601,14 @@ export default function RacePanel({
               trapKph: car.trapKph,
               sixtyFt: car.sixtyFt,
               blown: car.blown,
-              bestLap: circuit ? cs.bestLap : null,
             })
             .catch(() => {});
         }
       }
 
       setHud({ ...car });
-      if (circuit) {
-        setCircHud({ ...cs });
+      if (sprint) {
+        setSprintHud({ ...ss });
         setSlip(slipNow);
       }
 
@@ -652,12 +645,11 @@ export default function RacePanel({
               trapKph: car.trapKph,
               sixtyFt: car.sixtyFt,
               blown: car.blown,
-              bestLap: circuit ? cs.bestLap : null,
             })
             .catch(() => {});
         }
-        // circuit tracks are random one-offs — only drag ETs are PBs
-        if (car.et !== null && !circuit) recordEt(env.spec.id, car.et, car.trapKph);
+        // sprint courses are random one-offs — only drag ETs are PBs
+        if (car.et !== null && !sprint) recordEt(env.spec.id, car.et, car.trapKph);
         if (!roomRef.current) {
           setOutcome({
             kind: "solo",
@@ -666,7 +658,6 @@ export default function RacePanel({
               trapKph: car.trapKph,
               sixtyFt: car.sixtyFt,
               blown: car.blown,
-              bestLap: circuit ? cs.bestLap : null,
             },
             ghost: ghostRef.current!,
             aiLabel:
@@ -825,19 +816,21 @@ export default function RacePanel({
 
       {(phase === "armed" || phase === "done") && (
         <>
-          {raceCfgRef.current.circuit ? (
-            <CircuitTrackView
+          {raceCfgRef.current.sprint ? (
+            <SprintTrackView
               t={t}
-              cir={raceCfgRef.current.circuit}
-              cs={circHud}
+              spr={raceCfgRef.current.sprint}
+              ss={sprintHud}
               me={{
                 d: hud?.d ?? 0,
                 v: hud?.v ?? 0,
                 label: room ? playerName : "You",
                 blown: hud?.blown ?? false,
+                finished: hud?.finished ?? false,
               }}
               opps={opps}
               slip={slip}
+              braking={brakeRef.current}
             />
           ) : (
             <TrackView
@@ -855,8 +848,7 @@ export default function RacePanel({
             <RaceHud
               car={hud}
               env={envRef.current!}
-              circuit={raceCfgRef.current.circuit}
-              cs={circHud}
+              sprint={raceCfgRef.current.sprint}
               autoShift={autoShift && !room}
               allowAutoShift={!room}
               setAutoShift={setAutoShift}
@@ -873,10 +865,9 @@ export default function RacePanel({
         {phase === "done" && (
           <ResultsView
             outcome={outcome}
-            hud={hud}
-            cs={circHud}
+            ss={sprintHud}
             mode={raceCfgRef.current.mode}
-            circuit={raceCfgRef.current.circuit}
+            sprint={raceCfgRef.current.sprint}
             room={room}
             roomSnap={roomSnap}
             bestEt={bestEt ? bestEt.et : null}
@@ -932,9 +923,9 @@ function SetupView(p: {
               desc: "Launch, shift, hang on. Straight-line tune shootout.",
             },
             {
-              id: "circuit" as const,
-              title: "Random circuit — 2 laps",
-              desc: "A new track every race: brake for corners, chase perfect exits, use the slipstream. Weather roulette.",
+              id: "sprint" as const,
+              title: "Sprint — point to point",
+              desc: "A new course every race, one flat-out pass: brake for corners, chase perfect exits, use the slipstream. Weather roulette.",
             },
           ]
         ).map((m) => (
@@ -948,7 +939,7 @@ function SetupView(p: {
             }`}
           >
             <div className="text-sm font-bold">
-              {m.id === "drag" ? "🏁 " : "🌀 "}
+              {m.id === "drag" ? "🏁 " : "🛣️ "}
               {m.title}
             </div>
             <div className="text-xs text-muted">{m.desc}</div>
@@ -1130,8 +1121,8 @@ function SetupView(p: {
                   <span className="font-mono text-xs font-bold tracking-[0.2em] text-s1">
                     {e.code}
                   </span>
-                  <span title={e.mode === "circuit" ? "Random circuit" : "Drag ¼ mile"}>
-                    {e.mode === "circuit" ? "🌀" : "🏁"}
+                  <span title={e.mode === "sprint" ? "Random sprint" : "Drag ¼ mile"}>
+                    {e.mode === "sprint" ? "🛣️" : "🏁"}
                   </span>
                   <span className="truncate font-semibold">{e.hostName}</span>
                   <span className="hidden truncate text-xs text-ink2 sm:inline">
@@ -1223,7 +1214,7 @@ function LobbyView({
         {/* what we're racing — host can flip it, everyone sees it */}
         <div className="mb-1 flex items-center gap-2">
           {room.isHost ? (
-            (["drag", "circuit"] as const).map((m) => (
+            (["drag", "sprint"] as const).map((m) => (
               <button
                 key={m}
                 onClick={() => room.setMode(m).catch(() => {})}
@@ -1233,18 +1224,18 @@ function LobbyView({
                     : "border-grid text-muted hover:text-ink2"
                 }`}
               >
-                {m === "drag" ? "🏁 Drag ¼ mile" : "🌀 Random circuit"}
+                {m === "drag" ? "🏁 Drag ¼ mile" : "🛣️ Random sprint"}
               </button>
             ))
           ) : (
             <span className="rounded bg-raised px-3 py-1 text-xs font-bold text-ink2">
-              {mode === "drag" ? "🏁 Drag ¼ mile" : "🌀 Random circuit — 2 laps"}
+              {mode === "drag" ? "🏁 Drag ¼ mile" : "🛣️ Random sprint — point to point"}
             </span>
           )}
         </div>
-        {mode === "circuit" && (
+        {mode === "sprint" && (
           <div className="text-[11px] text-muted">
-            Track and weather are rolled at launch — nobody sees it first.
+            Course and weather are rolled at launch — nobody sees it first.
           </div>
         )}
         <div className="text-xs uppercase tracking-wider text-muted">Room code</div>
@@ -1350,8 +1341,8 @@ function LobbyView({
             onClick={() =>
               room.launch(
                 4500,
-                mode === "circuit"
-                  ? { circuitSeed: (Math.random() * 2 ** 31) | 0, laps: CIRCUIT_LAPS }
+                mode === "sprint"
+                  ? { circuitSeed: (Math.random() * 2 ** 31) | 0 }
                   : {},
               )
             }
@@ -1523,43 +1514,66 @@ function TrackView({
   );
 }
 
-/** one-lap track ribbon: corner bands, live car dots, next-corner callout */
-function CircuitTrackView({
+/** point-to-point ribbon: corner bands, car dots, and live brake guidance */
+function SprintTrackView({
   t,
-  cir,
-  cs,
+  spr,
+  ss,
   me,
   opps,
   slip,
+  braking,
 }: {
   t: number;
-  cir: Circuit;
-  cs: CircuitState | null;
-  me: { d: number; v: number; label: string; blown: boolean };
+  spr: Sprint;
+  ss: SprintState | null;
+  me: { d: number; v: number; label: string; blown: boolean; finished: boolean };
   opps: OppDisp[];
   slip: boolean;
+  braking: boolean;
 }) {
-  const pos = me.d % cir.lapM;
-  const { c: next, dist } = nextCorner(cir, pos);
-  const needBrake =
-    t >= 0 &&
-    me.v > next.vMax &&
-    dist <= brakeDistance(me.v, next.vMax, cir.grip) * 1.25;
-  const lap = Math.min(cs?.lap ?? 0, cir.laps - 1);
+  const pos = Math.min(me.d, spr.lengthM);
+  const nxt = nextCorner(spr, pos);
+
+  // brake guidance: where's my braking point, and am I going to make it?
+  const mph = (v: number) => (v * 2.23694).toFixed(0);
+  let guidance: {
+    label: string;
+    tone: string;
+    fill: number; // 0..1 → braking point approaching; 1 = brake NOW
+    entry: number; // projected entry speed at full braking, m/s
+    brakeAt: number; // course-metres where full braking must start
+  } | null = null;
+  if (nxt && t >= 0 && !me.finished) {
+    const dNeed = brakeDistance(me.v, nxt.c.vMax, spr.grip);
+    const entry = projectedEntry(me.v, nxt.dist, spr.grip);
+    const fill = me.v <= nxt.c.vMax ? 0 : clamp(dNeed / Math.max(nxt.dist, 1), 0, 1.4);
+    guidance = {
+      brakeAt: nxt.c.at - dNeed,
+      entry,
+      fill,
+      ...(me.v <= nxt.c.vMax * 1.02
+        ? { label: "FLAT OUT", tone: "text-good" }
+        : entry > nxt.c.vMax * 1.12
+          ? { label: "TOO HOT — you won't make it", tone: "text-crit" }
+          : fill >= 1
+            ? { label: braking ? "KEEP BRAKING" : "BRAKE NOW!", tone: "text-crit" }
+            : fill > 0.8
+              ? { label: "brake point coming…", tone: "text-warn" }
+              : { label: "no brakes yet", tone: "text-muted" }),
+    };
+  }
 
   return (
     <div className="flex flex-col gap-2 rounded border border-grid bg-surface p-3">
       {/* header */}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-        <span className="text-sm font-bold">{cir.name}</span>
+        <span className="text-sm font-bold">{spr.name}</span>
         <span className="rounded bg-raised px-1.5 py-0.5 text-ink2">
-          {weatherLabel(cir.weather)}
+          {weatherLabel(spr.weather)}
         </span>
         <span className="text-muted">
-          {(cir.lapM / 1000).toFixed(1)} km · {cir.corners.length} turns
-        </span>
-        <span className="font-mono font-bold text-s1">
-          LAP {lap + 1}/{cir.laps}
+          {(spr.lengthM / 1000).toFixed(1)} km · {spr.corners.length} turns · one pass
         </span>
         {slip && (
           <span className="animate-pulse rounded bg-s2/20 px-1.5 py-0.5 font-bold text-s2">
@@ -1567,30 +1581,40 @@ function CircuitTrackView({
           </span>
         )}
         <span className="ml-auto font-mono text-lg font-bold">
-          {t < 0 ? t.toFixed(1) : Math.min(t, CIRCUIT_TIMEOUT).toFixed(1)}
+          {t < 0 ? t.toFixed(1) : Math.min(t, SPRINT_TIMEOUT).toFixed(1)}
         </span>
       </div>
 
-      {/* the lap ribbon */}
+      {/* the course ribbon */}
       <div className="relative h-16 overflow-hidden rounded border border-grid bg-page">
-        {cir.corners.map((c) => (
+        {spr.corners.map((c) => (
           <div
             key={c.n}
             className="absolute inset-y-0 flex items-end justify-center pb-0.5 text-[9px] font-bold text-white/80"
             style={{
-              left: `${(c.at / cir.lapM) * 100}%`,
-              width: `${(c.len / cir.lapM) * 100}%`,
-              background: cornerColor(c, cir.grip),
+              left: `${(c.at / spr.lengthM) * 100}%`,
+              width: `${(c.len / spr.lengthM) * 100}%`,
+              background: cornerColor(c, spr.grip),
               opacity: 0.55,
             }}
-            title={`T${c.n} ${c.kind} — ${(c.vMax * 2.23694).toFixed(0)} mph`}
+            title={`T${c.n} ${c.kind} — ${mph(c.vMax)} mph`}
           >
             T{c.n}
           </div>
         ))}
-        {/* start/finish */}
+        {/* your braking point for the next corner — brake when you reach ▼ */}
+        {guidance && guidance.fill > 0 && guidance.brakeAt > pos - 5 && (
+          <div
+            className="absolute top-0 -translate-x-1/2 text-[10px] font-black text-crit"
+            style={{ left: `${clamp((guidance.brakeAt / spr.lengthM) * 100, 0, 100)}%` }}
+            title="brake here"
+          >
+            ▼
+          </div>
+        )}
+        {/* finish flag */}
         <div
-          className="absolute inset-y-0 left-0 w-1.5 opacity-80"
+          className="absolute inset-y-0 right-0 w-2 opacity-80"
           style={{
             backgroundImage: "repeating-conic-gradient(#fff 0% 25%, #111 0% 50%)",
             backgroundSize: "5px 5px",
@@ -1601,53 +1625,74 @@ function CircuitTrackView({
             key={o.id}
             className="absolute top-2 h-3 w-3 -translate-x-1/2 rounded-full border border-black/50"
             style={{
-              left: `${((o.d % cir.lapM) / cir.lapM) * 100}%`,
+              left: `${clamp((o.d / spr.lengthM) * 100, 0, 99)}%`,
               background: o.blown ? "#d03b3b" : o.color,
             }}
-            title={`${o.label} — lap ${Math.floor(o.d / cir.lapM) + 1}`}
+            title={o.label}
           />
         ))}
         <div
           className="absolute bottom-2 h-4 w-4 -translate-x-1/2 rounded-full border-2 border-white/70"
           style={{
-            left: `${(pos / cir.lapM) * 100}%`,
+            left: `${clamp((pos / spr.lengthM) * 100, 0, 99)}%`,
             background: me.blown ? "#d03b3b" : "#3987e5",
           }}
         />
       </div>
 
-      {/* next corner + events */}
+      {/* brake guidance row */}
       <div className="flex min-h-6 flex-wrap items-center gap-3 text-xs">
-        <span className="font-mono text-ink2">
-          → T{next.n} {next.kind} · {(next.vMax * 2.23694).toFixed(0)} mph ·{" "}
-          {dist.toFixed(0)} m
-        </span>
-        {needBrake && (
-          <span className="animate-pulse rounded bg-crit px-2 py-0.5 font-black text-white">
-            BRAKE!
+        {nxt ? (
+          <>
+            <span className="font-mono text-ink2">
+              → T{nxt.c.n} {nxt.c.kind} · <b>{mph(nxt.c.vMax)} mph</b> ·{" "}
+              {nxt.dist.toFixed(0)} m
+            </span>
+            {guidance && (
+              <>
+                {/* fills as your braking point approaches; red line = brake */}
+                <div className="relative h-3 w-28 overflow-hidden rounded bg-page">
+                  <div
+                    className={`h-full transition-none ${
+                      guidance.fill >= 1
+                        ? "bg-crit"
+                        : guidance.fill > 0.8
+                          ? "bg-warn"
+                          : "bg-s2"
+                    }`}
+                    style={{ width: `${clamp(guidance.fill, 0, 1) * 100}%` }}
+                  />
+                  <div className="absolute inset-y-0 right-0 w-0.5 bg-crit" />
+                </div>
+                <span className={`font-mono font-bold ${guidance.tone} ${guidance.fill >= 1 ? "animate-pulse" : ""}`}>
+                  {guidance.label}
+                </span>
+                {guidance.fill > 0 && (
+                  <span className="font-mono text-muted">
+                    entry if braking: {mph(Math.max(guidance.entry, nxt.c.vMax))} mph
+                  </span>
+                )}
+              </>
+            )}
+          </>
+        ) : (
+          <span className="font-mono font-bold text-good">
+            🏁 FLAT OUT TO THE FLAG — {Math.max(0, spr.lengthM - pos).toFixed(0)} m
           </span>
         )}
-        {cs?.event && t - cs.event.t < 2.2 && (
+        {ss?.event && t - ss.event.t < 2.2 && (
           <motion.span
-            key={`${cs.event.kind}-${cs.event.t.toFixed(2)}`}
+            key={`${ss.event.kind}-${ss.event.t.toFixed(2)}`}
             initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
             className={`rounded px-2 py-0.5 font-bold ${
-              cs.event.kind === "wide"
-                ? "bg-crit/20 text-crit"
-                : cs.event.kind === "perfect"
-                  ? "bg-good/20 text-good"
-                  : "bg-s1/20 text-s1"
+              ss.event.kind === "wide" ? "bg-crit/20 text-crit" : "bg-good/20 text-good"
             }`}
           >
-            {cs.event.text}
+            {ss.event.text}
           </motion.span>
         )}
-        <span className="ml-auto font-mono text-muted">
-          last {cs?.lastLap ? `${cs.lastLap.toFixed(2)}s` : "—"} · best{" "}
-          {cs?.bestLap ? `${cs.bestLap.toFixed(2)}s` : "—"} ·{" "}
-          {cs?.perfect ?? 0} ✓
-        </span>
+        <span className="ml-auto font-mono text-muted">{ss?.perfect ?? 0} ✓</span>
       </div>
     </div>
   );
@@ -1656,8 +1701,7 @@ function CircuitTrackView({
 function RaceHud({
   car,
   env,
-  circuit,
-  cs,
+  sprint,
   autoShift,
   allowAutoShift,
   setAutoShift,
@@ -1668,8 +1712,7 @@ function RaceHud({
 }: {
   car: RaceCar;
   env: RaceEnv;
-  circuit: Circuit | null;
-  cs: CircuitState | null;
+  sprint: Sprint | null;
   autoShift: boolean;
   /** auto-shift is a solo assist — hidden entirely in multiplayer */
   allowAutoShift: boolean;
@@ -1730,11 +1773,11 @@ function RaceHud({
             {boost.toFixed(0)} kPa
           </span>
         </div>
-        {circuit ? (
+        {sprint ? (
           <div>
-            <span className="text-[10px] uppercase text-muted">lap </span>
+            <span className="text-[10px] uppercase text-muted">to go </span>
             <span className="text-lg font-bold text-ink2">
-              {Math.min((cs?.lap ?? 0) + 1, circuit.laps)}/{circuit.laps}
+              {Math.max(0, sprint.lengthM - car.d).toFixed(0)} m
             </span>
           </div>
         ) : (
@@ -1800,7 +1843,7 @@ function RaceHud({
             E / ↑
           </span>
         </button>
-        {circuit ? (
+        {sprint ? (
           <button
             onPointerDown={(e) => {
               e.preventDefault();
@@ -1834,7 +1877,7 @@ function RaceHud({
           onContextMenu={(e) => e.preventDefault()}
           style={{ touchAction: "none", WebkitTouchCallout: "none" }}
           className={`h-16 select-none rounded text-sm font-black tracking-widest sm:order-2 sm:flex-[1.6] ${
-            !circuit ? "col-span-2" : ""
+            !sprint ? "col-span-2" : ""
           } ${car.throttle > 0 ? "bg-s2 text-white" : "bg-raised text-ink2"}`}
         >
           THROTTLE
@@ -1858,10 +1901,9 @@ function RaceHud({
 
 function ResultsView({
   outcome,
-  hud,
-  cs,
+  ss,
   mode,
-  circuit,
+  sprint,
   room,
   roomSnap,
   bestEt,
@@ -1870,10 +1912,9 @@ function ResultsView({
   onLeave,
 }: {
   outcome: Outcome | null;
-  hud: RaceCar | null;
-  cs: CircuitState | null;
+  ss: SprintState | null;
   mode: RaceMode;
-  circuit: Circuit | null;
+  sprint: Sprint | null;
   room: RaceRoom | null;
   roomSnap: RoomSnapshot | null;
   bestEt: number | null;
@@ -1881,11 +1922,11 @@ function ResultsView({
   onRematch: () => void;
   onLeave: () => void;
 }) {
-  const isCircuit = mode === "circuit";
+  const isSprint = mode === "sprint";
   let rows: { name: string; res: Partial<RaceResult>; me: boolean }[] = [];
   let verdict = "";
 
-  if (outcome?.kind === "solo" && hud) {
+  if (outcome?.kind === "solo") {
     rows = [
       { name: "You", res: outcome.me, me: true },
       {
@@ -1895,7 +1936,6 @@ function ResultsView({
           trapKph: outcome.ghost.trapKph,
           sixtyFt: outcome.ghost.sixtyFt,
           blown: outcome.ghost.blown,
-          bestLap: outcome.ghost.bestLap ?? null,
         },
         me: false,
       },
@@ -1951,11 +1991,11 @@ function ResultsView({
       >
         {verdict}
       </div>
-      {isCircuit && circuit && (
+      {isSprint && sprint && (
         <div className="mb-2 text-center text-xs text-muted">
-          {circuit.name} · {weatherLabel(circuit.weather)} ·{" "}
-          {(circuit.lapM / 1000).toFixed(1)} km × {circuit.laps} laps
-          {cs ? ` · ${cs.perfect} perfect exit${cs.perfect === 1 ? "" : "s"}, ${cs.wideCount} off` : ""}
+          {sprint.name} · {weatherLabel(sprint.weather)} ·{" "}
+          {(sprint.lengthM / 1000).toFixed(1)} km point-to-point
+          {ss ? ` · ${ss.perfect} perfect exit${ss.perfect === 1 ? "" : "s"}, ${ss.wideCount} off` : ""}
         </div>
       )}
       <table className="w-full text-sm">
@@ -1963,10 +2003,10 @@ function ResultsView({
           <tr className="text-left text-[10px] uppercase tracking-wider text-muted">
             <th className="w-6 py-1">#</th>
             <th>Driver</th>
-            {isCircuit ? (
+            {isSprint ? (
               <>
-                <th>Total</th>
-                <th>Best lap</th>
+                <th>Time</th>
+                <th>Finish speed</th>
               </>
             ) : (
               <>
@@ -1986,10 +2026,14 @@ function ResultsView({
               <td className={`py-1.5 ${r.me ? "font-bold text-s1" : "text-ink2"}`}>
                 {r.name} {r.res.blown && "💥"}
               </td>
-              {isCircuit ? (
+              {isSprint ? (
                 <>
                   <td className="font-bold">{fmtEt(r.res.et)}</td>
-                  <td>{fmtT(r.res.bestLap ?? null)}</td>
+                  <td>
+                    {r.res.trapKph && r.res.trapKph > 0
+                      ? `${(r.res.trapKph * 0.621371).toFixed(0)} mph`
+                      : "—"}
+                  </td>
                 </>
               ) : (
                 <>
@@ -2006,7 +2050,7 @@ function ResultsView({
           ))}
         </tbody>
       </table>
-      {bestEt !== null && !isCircuit && (
+      {bestEt !== null && !isSprint && (
         <div className="mt-2 text-center text-xs text-muted">
           Personal best on this engine: <span className="font-bold text-s1">{fmtEt(bestEt)}</span>
         </div>

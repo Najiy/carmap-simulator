@@ -52,7 +52,11 @@ export interface RaceResult {
 }
 
 export type RoomStatus = "lobby" | "racing";
-export type RoomMode = "drag" | "circuit";
+export type RoomMode = "drag" | "sprint";
+
+/** old clients wrote "circuit" — same thing, read it as sprint */
+const parseMode = (v: unknown): RoomMode =>
+  v === "sprint" || v === "circuit" ? "sprint" : "drag";
 
 export const MAX_PLAYERS = 8;
 
@@ -243,7 +247,7 @@ export class RaceRoom {
         code: this.code,
         hostId: v.hostId,
         status: v.status ?? "lobby",
-        mode: v.mode === "circuit" ? "circuit" : "drag",
+        mode: parseMode(v.mode),
         circuitSeed: typeof v.circuitSeed === "number" ? v.circuitSeed : null,
         laps: typeof v.laps === "number" ? v.laps : 2,
         greenAt: typeof v.greenAt === "number" ? v.greenAt : null,
@@ -298,7 +302,7 @@ export class RaceRoom {
             players: e.players ?? 1,
             hasPass: !!e.hasPass,
             status: (e.status ?? "lobby") as RoomStatus,
-            mode: (e.mode === "circuit" ? "circuit" : "drag") as RoomMode,
+            mode: parseMode(e.mode),
             createdAt: e.createdAt ?? 0,
           }))
           .filter((e) => now - e.createdAt < 2 * 3600_000)

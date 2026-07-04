@@ -11,37 +11,38 @@ import {
 import { GEARBOX } from "./engines";
 
 /**
- * Random-circuit race mode. A circuit is a 1-D lap: straights punctuated by
- * corners, each corner a speed ceiling. Carry too much speed in and you run
- * wide; nail the entry and you get a perfect-exit. Everything derives from
- * one integer seed so multiplayer clients build the identical track.
+ * Random-sprint race mode: a point-to-point course run once. Straights
+ * punctuated by corners, each corner a speed ceiling — brake in time or run
+ * wide. Everything derives from one integer seed so multiplayer clients
+ * build the identical course.
  */
 
-export type RaceMode = "drag" | "circuit";
+export type RaceMode = "drag" | "sprint";
 export type Weather = "dry" | "damp" | "wet";
 
 export interface Corner {
   n: number; // T1, T2, …
-  at: number; // lap-metres where it starts
+  at: number; // metres from the start where it begins
   len: number;
   vMax: number; // m/s ceiling through the corner (grip already applied)
   kind: "hairpin" | "chicane" | "corner" | "sweeper";
 }
 
-export interface Circuit {
+export interface Sprint {
   seed: number;
   name: string;
   weather: Weather;
   /** grip multiplier — scales corner speed, traction and brakes */
   grip: number;
-  lapM: number;
-  laps: number;
+  lengthM: number;
   corners: Corner[];
 }
 
-/** a circuit race can't run forever — clock caps at 6 minutes */
-export const CIRCUIT_TIMEOUT = 360;
-export const CIRCUIT_LAPS = 2;
+/** a sprint can't run forever — clock caps at 4 minutes */
+export const SPRINT_TIMEOUT = 240;
+
+/** full-braking decel on this surface, m/s² (must match brakeG below) */
+export const brakeDecel = (grip: number) => 9.4 * grip;
 
 function mulberry32(a: number) {
   return () => {
@@ -59,11 +60,11 @@ const NAME_A = [
   "Pinehurst", "Quarry", "Ravenna", "Sakura", "Thistle", "Vantage",
 ];
 const NAME_B = [
-  "Park", "Ring", "Raceway", "Circuit", "GP", "Speedpark", "Sprint",
-  "International", "Club", "Hillside",
+  "Pass", "Run", "Stage", "Sprint", "Climb", "Descent", "Straights",
+  "Backroad", "Coast Road", "Ridge",
 ];
 
-export function generateCircuit(seed: number, laps = CIRCUIT_LAPS): Circuit {
+export function generateSprint(seed: number): Sprint {
   const rnd = mulberry32(seed || 1);
 
   const wRoll = rnd();
@@ -72,7 +73,7 @@ export function generateCircuit(seed: number, laps = CIRCUIT_LAPS): Circuit {
 
   const nCorners = 5 + Math.floor(rnd() * 5); // 5–9 turns
   const corners: Corner[] = [];
-  let d = 150 + rnd() * 250; // opening straight off the grid
+  let d = 250 + rnd() * 300; // opening straight off the line
 
   for (let i = 0; i < nCorners; i++) {
     const roll = rnd();
@@ -103,7 +104,7 @@ export function generateCircuit(seed: number, laps = CIRCUIT_LAPS): Circuit {
       vMax: vBase * grip,
       kind,
     });
-    d += len + 160 + rnd() * 430; // straight to the next one
+    d += len + 170 + rnd() * 400; // straight to the next one
   }
 
   return {
@@ -111,148 +112,122 @@ export function generateCircuit(seed: number, laps = CIRCUIT_LAPS): Circuit {
     name: `${NAME_A[Math.floor(rnd() * NAME_A.length)]} ${NAME_B[Math.floor(rnd() * NAME_B.length)]}`,
     weather,
     grip,
-    lapM: Math.round(d + 60),
-    laps,
+    lengthM: Math.round(d + 150), // flat-out run to the flag
     corners,
   };
 }
 
-export interface CircuitEvent {
-  kind: "wide" | "perfect" | "lap";
+export interface SprintEvent {
+  kind: "wide" | "perfect";
   t: number;
   text: string;
 }
 
-export interface CircuitState {
-  lap: number; // completed laps
-  lapStartT: number;
-  lastLap: number | null;
-  bestLap: number | null;
+export interface SprintState {
   offT: number; // seconds left bouncing across the grass
   cornerN: number; // corner currently occupied (-1 = straight)
   entryClean: boolean; // carried ≥96% of vMax in without running wide
   wideCount: number;
   perfect: number;
-  event: CircuitEvent | null;
-  finished: boolean;
+  event: SprintEvent | null;
 }
 
-export function createCircuitState(): CircuitState {
+export function createSprintState(): SprintState {
   return {
-    lap: 0,
-    lapStartT: 0,
-    lastLap: null,
-    bestLap: null,
     offT: 0,
     cornerN: -1,
     entryClean: false,
     wideCount: 0,
     perfect: 0,
     event: null,
-    finished: false,
   };
 }
 
-export const cornerAt = (cir: Circuit, pos: number): Corner | null =>
-  cir.corners.find((c) => pos >= c.at && pos < c.at + c.len) ?? null;
+export const cornerAt = (spr: Sprint, pos: number): Corner | null =>
+  spr.corners.find((c) => pos >= c.at && pos < c.at + c.len) ?? null;
 
-/** the next corner ahead of lap-position `pos` (wrapping) + distance to it */
-export function nextCorner(cir: Circuit, pos: number): { c: Corner; dist: number } {
-  for (const c of cir.corners) {
+/** the next corner ahead of position `pos`, or null when it's flag-out */
+export function nextCorner(
+  spr: Sprint,
+  pos: number,
+): { c: Corner; dist: number } | null {
+  for (const c of spr.corners) {
     if (c.at + c.len > pos) {
       return { c, dist: Math.max(0, c.at - pos) };
     }
   }
-  return { c: cir.corners[0], dist: cir.lapM - pos + cir.corners[0].at };
+  return null;
 }
 
 /** metres needed to brake from v to vt at this grip level (+ margin) */
 export const brakeDistance = (v: number, vt: number, grip: number) =>
-  v <= vt ? 0 : (v * v - vt * vt) / (2 * 9.4 * grip) + 8;
+  v <= vt ? 0 : (v * v - vt * vt) / (2 * brakeDecel(grip)) + 8;
+
+/** entry speed if you brake flat-out from here to the corner, m/s */
+export const projectedEntry = (v: number, dist: number, grip: number) =>
+  Math.sqrt(Math.max(0, v * v - 2 * brakeDecel(grip) * Math.max(0, dist - 4)));
 
 /**
- * Corner / lap bookkeeping, applied after every physics step. Mutates both
- * the car (speed clamps, finish) and the circuit state. Deterministic.
+ * Corner bookkeeping, applied after every physics step. The finish line
+ * itself is handled by stepRaceCar via finishD. Deterministic.
  */
-export function stepCircuit(
+export function stepSprint(
   car: import("./race").RaceCar,
-  cs: CircuitState,
-  cir: Circuit,
+  ss: SprintState,
+  spr: Sprint,
   dt = RACE_STEP,
 ): void {
-  if (cs.finished || car.t < 0) return;
-  const pos = car.d % cir.lapM;
-  const c = cornerAt(cir, pos);
+  if (car.finished || car.t < 0) return;
+  const pos = car.d;
+  const c = cornerAt(spr, pos);
 
   // running wide: dumped onto the grass, crawling back on line
-  if (cs.offT > 0) {
-    cs.offT -= dt;
+  if (ss.offT > 0) {
+    ss.offT -= dt;
     car.v = Math.min(car.v, (c?.vMax ?? 28) * 0.7);
   }
 
   if (c) {
-    if (cs.cornerN !== c.n) {
+    if (ss.cornerN !== c.n) {
       // corner entry
-      cs.cornerN = c.n;
+      ss.cornerN = c.n;
       if (car.v > c.vMax * 1.12) {
         // way too hot — run wide, big time loss
-        cs.offT = 1.1;
-        cs.wideCount++;
-        cs.entryClean = false;
+        ss.offT = 1.1;
+        ss.wideCount++;
+        ss.entryClean = false;
         car.v = c.vMax * 0.55;
-        cs.event = {
+        ss.event = {
           kind: "wide",
           t: car.t,
           text: `WIDE at T${c.n} — braked too late`,
         };
       } else {
-        cs.entryClean = car.v >= c.vMax * 0.96;
+        ss.entryClean = car.v >= c.vMax * 0.96;
       }
     }
     // tyres scrub any leftover excess down to the ceiling
     if (car.v > c.vMax) car.v = Math.max(c.vMax, car.v - 16 * dt);
-  } else if (cs.cornerN !== -1) {
+  } else if (ss.cornerN !== -1) {
     // corner exit
-    if (cs.entryClean && cs.offT <= 0) {
-      cs.perfect++;
-      cs.event = {
+    if (ss.entryClean && ss.offT <= 0) {
+      ss.perfect++;
+      ss.event = {
         kind: "perfect",
         t: car.t,
-        text: `Perfect exit — T${cs.cornerN} ✓`,
+        text: `Perfect exit — T${ss.cornerN} ✓`,
       };
     }
-    cs.cornerN = -1;
-  }
-
-  // lap line
-  const lapNow = Math.floor(car.d / cir.lapM);
-  if (lapNow > cs.lap) {
-    const lapTime = car.t - cs.lapStartT;
-    cs.lastLap = lapTime;
-    if (cs.bestLap === null || lapTime < cs.bestLap) cs.bestLap = lapTime;
-    cs.lap = lapNow;
-    cs.lapStartT = car.t;
-    if (cs.lap >= cir.laps) {
-      cs.finished = true;
-      car.finished = true;
-      car.et = car.t; // total race time
-      car.trapKph = car.v * 3.6;
-    } else {
-      cs.event = {
-        kind: "lap",
-        t: car.t,
-        text: `Lap ${cs.lap}: ${lapTime.toFixed(2)}s`,
-      };
-    }
+    ss.cornerN = -1;
   }
 }
 
-/** step options shared by the player and the AI on a given circuit */
-export function circuitOpts(cir: Circuit, slipstream: boolean) {
+/** step options shared by the player and the AI on a given sprint */
+export function sprintOpts(spr: Sprint, slipstream: boolean) {
   return {
-    finishD: Infinity,
-    tractionScale: cir.grip,
-    brakeG: 1.15 * cir.grip,
+    finishD: spr.lengthM,
+    tractionScale: spr.grip,
+    brakeG: (brakeDecel(spr.grip) / 9.81) * 1.2, // pedal has margin over the planner
     dragScale: slipstream ? 0.62 : 1,
   };
 }
@@ -264,38 +239,35 @@ const AI_AGGR: Record<AiLevel, number> = {
   pro: 1.0,
 };
 
-export interface CircuitGhostResult extends GhostResult {
-  bestLap: number | null;
-}
-
-/** Pre-run an AI lap set deterministically on the same circuit. */
-export function simulateCircuitGhost(
+/** Pre-run an AI sprint deterministically on the same course. */
+export function simulateSprintGhost(
   env: RaceEnv,
-  cir: Circuit,
+  spr: Sprint,
   level: AiLevel,
   throttleFrom: number,
-): CircuitGhostResult {
+): GhostResult {
   const aggr = AI_AGGR[level];
   const car = createRaceCar(env.spec, 100);
-  const cs = createCircuitState();
+  const ss = createSprintState();
   const frames: GhostFrame[] = [];
-  const opts = circuitOpts(cir, false);
+  const opts = sprintOpts(spr, false);
   let i = 0;
 
-  while (car.t < CIRCUIT_TIMEOUT) {
+  while (car.t < SPRINT_TIMEOUT) {
     let throttle = car.t >= throttleFrom;
     let brake = false;
-    if (car.t >= 0 && !cs.finished) {
-      const pos = car.d % cir.lapM;
-      const inC = cornerAt(cir, pos);
-      const { c, dist } = nextCorner(cir, pos);
-      const target = c.vMax * aggr;
+    if (car.t >= 0 && !car.finished) {
+      const inC = cornerAt(spr, car.d);
+      const nxt = nextCorner(spr, car.d);
       if (inC && car.v > inC.vMax * aggr) {
         brake = true;
         throttle = false;
-      } else if (!inC && car.v > target && dist <= brakeDistance(car.v, target, cir.grip)) {
-        brake = true;
-        throttle = false;
+      } else if (nxt) {
+        const target = nxt.c.vMax * aggr;
+        if (car.v > target && nxt.dist <= brakeDistance(car.v, target, spr.grip)) {
+          brake = true;
+          throttle = false;
+        }
       }
     }
     const shiftUp =
@@ -326,11 +298,11 @@ export function simulateCircuitGhost(
       ...opts,
       brake,
     });
-    stepCircuit(car, cs, cir);
+    stepSprint(car, ss, spr);
     if (i++ % 4 === 0) {
       frames.push({ t: car.t, d: car.d, v: car.v, rpm: car.rpm, gear: car.gear });
     }
-    if (cs.finished && car.t > (car.et ?? 0) + 1.5) break;
+    if (car.finished && car.t > (car.et ?? 0) + 1.5) break;
     if (car.blown && car.v < 2) break;
   }
 
@@ -340,7 +312,6 @@ export function simulateCircuitGhost(
     trapKph: car.trapKph,
     sixtyFt: car.sixtyFt,
     blown: car.blown,
-    bestLap: cs.bestLap,
   };
 }
 
