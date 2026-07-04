@@ -186,6 +186,7 @@ export default function RacePanel({
   const throttleRef = useRef(false);
   const brakeRef = useRef(false);
   const shiftQueueRef = useRef(0);
+  const downQueueRef = useRef(0);
   const gearRequestRef = useRef<number | null>(null);
   const autoShiftRef = useRef(autoShift);
   const phaseRef = useRef(phase);
@@ -518,6 +519,7 @@ export default function RacePanel({
           }
         } else if (car.t < 0) {
           shiftQueueRef.current = 0;
+          downQueueRef.current = 0;
           gearRequestRef.current = null;
         }
         // H-pattern grab: applied as soon as the box is free
@@ -525,6 +527,33 @@ export default function RacePanel({
         if (gearRequestRef.current !== null && car.t >= 0 && car.shiftT <= 0) {
           gearSel = gearRequestRef.current;
           gearRequestRef.current = null;
+        } else if (
+          downQueueRef.current > 0 &&
+          car.t >= 0 &&
+          car.shiftT <= 0 &&
+          car.gear > 0
+        ) {
+          // manual downshift — no over-rev guard: the money shift is on you
+          gearSel = car.gear - 1;
+          downQueueRef.current = 0;
+        } else if (
+          autoShiftRef.current &&
+          !roomRef.current &&
+          circuit !== null &&
+          car.t >= 0 &&
+          car.shiftT <= 0 &&
+          car.gear > 0 &&
+          car.v > 3 &&
+          car.rpm < env.shiftRpm * 0.45
+        ) {
+          // solo assist: grab a lower gear out of slow corners — but only
+          // when the lower gear won't spin the crank past the limiter
+          const rpmAfter =
+            (car.v / GEARBOX.wheelRadiusM) *
+            GEARBOX.ratios[car.gear - 1] *
+            GEARBOX.final *
+            9.549;
+          if (rpmAfter < env.spec.revLimit * 0.9) gearSel = car.gear - 1;
         }
         stepRaceCar(car, env, throttleRef.current, shift, gearSel, RACE_STEP, stepOpts);
         if (circuit) stepCircuit(car, cs, circuit);
@@ -687,6 +716,9 @@ export default function RacePanel({
       } else if (!e.repeat && (e.key === "ArrowUp" || e.key.toLowerCase() === "e")) {
         e.preventDefault();
         shiftQueueRef.current = 1;
+      } else if (!e.repeat && e.key.toLowerCase() === "q") {
+        e.preventDefault();
+        downQueueRef.current = 1;
       } else if (!e.repeat && /^[0-9]$/.test(e.key)) {
         e.preventDefault();
         gearRequestRef.current = Number(e.key) - 1; // 0 = neutral
@@ -703,6 +735,7 @@ export default function RacePanel({
       window.removeEventListener("keyup", up);
       throttleRef.current = false;
       brakeRef.current = false;
+      downQueueRef.current = 0;
       gearRequestRef.current = null;
     };
   }, [phase]);
@@ -830,6 +863,7 @@ export default function RacePanel({
               onThrottle={(v) => (throttleRef.current = v)}
               onBrake={(v) => (brakeRef.current = v)}
               onShift={() => (shiftQueueRef.current = 1)}
+              onShiftDown={() => (downQueueRef.current = 1)}
             />
           )}
         </>
@@ -1630,6 +1664,7 @@ function RaceHud({
   onThrottle,
   onBrake,
   onShift,
+  onShiftDown,
 }: {
   car: RaceCar;
   env: RaceEnv;
@@ -1642,6 +1677,7 @@ function RaceHud({
   onThrottle: (v: boolean) => void;
   onBrake: (v: boolean) => void;
   onShift: () => void;
+  onShiftDown: () => void;
 }) {
   const spec = env.spec;
   const rpmPct = clamp((car.rpm / spec.revLimit) * 100, 0, 100);
@@ -1730,9 +1766,41 @@ function RaceHud({
         </label>
       </div>
 
-      {/* touch / mouse controls */}
-      <div className="flex gap-2">
-        {circuit && (
+      {/* touch / mouse controls — 2×2 thumb grid on phones, one row on desktop */}
+      <div className="grid grid-cols-2 gap-2 sm:flex">
+        <button
+          onPointerDown={(e) => {
+            e.preventDefault();
+            onShiftDown();
+          }}
+          disabled={autoShift}
+          onContextMenu={(e) => e.preventDefault()}
+          style={{ touchAction: "none", WebkitTouchCallout: "none" }}
+          className="h-12 select-none rounded bg-raised text-sm font-black tracking-widest text-ink2 active:bg-axis disabled:opacity-30 sm:order-3 sm:h-16 sm:w-24"
+        >
+          ▼ SHIFT
+          <span className="block text-[9px] font-semibold text-muted">Q</span>
+        </button>
+        <button
+          onPointerDown={(e) => {
+            e.preventDefault();
+            onShift();
+          }}
+          disabled={autoShift}
+          onContextMenu={(e) => e.preventDefault()}
+          style={{ touchAction: "none", WebkitTouchCallout: "none" }}
+          className={`h-12 select-none rounded text-sm font-black tracking-widest disabled:opacity-30 sm:order-4 sm:h-16 sm:w-24 ${
+            wantShift ? "bg-warn text-black" : "bg-raised text-ink2 active:bg-axis"
+          }`}
+        >
+          ▲ SHIFT
+          <span
+            className={`block text-[9px] font-semibold ${wantShift ? "text-black/60" : "text-muted"}`}
+          >
+            E / ↑
+          </span>
+        </button>
+        {circuit ? (
           <button
             onPointerDown={(e) => {
               e.preventDefault();
@@ -1743,10 +1811,15 @@ function RaceHud({
             onPointerCancel={() => onBrake(false)}
             onContextMenu={(e) => e.preventDefault()}
             style={{ touchAction: "none", WebkitTouchCallout: "none" }}
-            className="h-14 flex-1 select-none rounded bg-crit/80 text-sm font-black tracking-widest text-white active:bg-crit"
+            className="h-16 select-none rounded bg-crit/80 text-sm font-black tracking-widest text-white active:bg-crit sm:order-1 sm:flex-1"
           >
-            BRAKE (S)
+            BRAKE
+            <span className="block text-[9px] font-semibold text-white/60">
+              hold · S / ↓
+            </span>
           </button>
+        ) : (
+          <div className="hidden sm:order-1 sm:block" />
         )}
         <button
           onPointerDown={(e) => {
@@ -1760,25 +1833,18 @@ function RaceHud({
           onPointerCancel={() => onThrottle(false)}
           onContextMenu={(e) => e.preventDefault()}
           style={{ touchAction: "none", WebkitTouchCallout: "none" }}
-          className={`h-14 flex-1 select-none rounded text-sm font-black tracking-widest ${
-            car.throttle > 0 ? "bg-s2 text-white" : "bg-raised text-ink2"
-          }`}
+          className={`h-16 select-none rounded text-sm font-black tracking-widest sm:order-2 sm:flex-[1.6] ${
+            !circuit ? "col-span-2" : ""
+          } ${car.throttle > 0 ? "bg-s2 text-white" : "bg-raised text-ink2"}`}
         >
-          THROTTLE — hold (Space)
-        </button>
-        <button
-          onPointerDown={(e) => {
-            e.preventDefault();
-            onShift();
-          }}
-          disabled={autoShift}
-          onContextMenu={(e) => e.preventDefault()}
-          style={{ touchAction: "none", WebkitTouchCallout: "none" }}
-          className={`h-14 w-36 select-none rounded text-sm font-black tracking-widest disabled:opacity-30 ${
-            wantShift ? "bg-warn text-black" : "bg-raised text-ink2"
-          }`}
-        >
-          SHIFT ▲ (E)
+          THROTTLE
+          <span
+            className={`block text-[9px] font-semibold ${
+              car.throttle > 0 ? "text-white/60" : "text-muted"
+            }`}
+          >
+            hold · Space
+          </span>
         </button>
       </div>
       {car.t < 0 && (

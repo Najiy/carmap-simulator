@@ -305,7 +305,24 @@ export function simulateCircuitGhost(
       !brake &&
       car.rpm >= env.shiftRpm &&
       car.gear < GEARBOX.ratios.length - 1;
-    stepRaceCar(car, env, throttle, shiftUp, null, RACE_STEP, {
+    // grab a lower gear out of slow corners when it won't over-rev
+    let gearSel: number | null = null;
+    if (
+      !shiftUp &&
+      car.t >= 0 &&
+      car.shiftT <= 0 &&
+      car.gear > 0 &&
+      car.v > 3 &&
+      car.rpm < env.shiftRpm * 0.45
+    ) {
+      const rpmAfter =
+        (car.v / GEARBOX.wheelRadiusM) *
+        GEARBOX.ratios[car.gear - 1] *
+        GEARBOX.final *
+        9.549;
+      if (rpmAfter < env.spec.revLimit * 0.9) gearSel = car.gear - 1;
+    }
+    stepRaceCar(car, env, throttle, shiftUp, gearSel, RACE_STEP, {
       ...opts,
       brake,
     });
