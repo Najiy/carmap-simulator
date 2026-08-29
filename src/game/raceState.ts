@@ -160,7 +160,8 @@ export class Ghost {
   set(live: LiveState) {
     if (live.x === undefined || live.z === undefined) return;
     this.target.set(live.x, 0, live.z);
-    this.targetH = live.h ?? 0;
+    // a heading of h is a scene rotation of -h — see scripts/yaw-check.mjs
+    this.targetH = -(live.h ?? 0);
     if (!this.started) {
       this.started = true;
       this.object.position.copy(this.target);

@@ -4,6 +4,7 @@ import type { EngineSpec } from "../engine/engines";
 import { GEARBOX } from "../engine/engines";
 import { engine, useEngineSnapshot } from "../engine/store";
 import { engineSound } from "../engine/sound";
+import { bindGearKeys } from "../lib/gearKeys";
 import { useTuneStore } from "../store/tuneStore";
 
 export default function Controls({ spec }: { spec: EngineSpec }) {
@@ -16,8 +17,11 @@ export default function Controls({ spec }: { spec: EngineSpec }) {
     engineSound.setMuted(muted);
   }, [muted]);
 
-  // global keys: W or Space = wide-open throttle, S = full brake,
-  // E/Q = shift gears, digits = direct gear selection (0 = neutral)
+  // the gearbox keys are shared with the driving game, so they are bound in
+  // one place — two listeners meant one press ran two relative shifts
+  useEffect(() => bindGearKeys(), []);
+
+  // global keys: W or Space = wide-open throttle, S = full brake
   useEffect(() => {
     const isTyping = (e: KeyboardEvent) =>
       (e.target as HTMLElement)?.closest("input,textarea,[tabindex]") !== null;
@@ -32,9 +36,7 @@ export default function Controls({ spec }: { spec: EngineSpec }) {
       } else if (k === "s") {
         if (brakeBefore === null) brakeBefore = engine.getSnapshot().brake;
         engine.setBrake(1);
-      } else if (k === "e") engine.shift(1);
-      else if (k === "q") engine.shift(-1);
-      else if (/^[0-9]$/.test(k)) engine.setGear(Number(k) - 1);
+      }
     };
     const up = (e: KeyboardEvent) => {
       const k = e.key.toLowerCase();

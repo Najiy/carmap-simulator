@@ -153,6 +153,74 @@ const check = (name: string, ok: boolean) => {
   check("a parked car does not rotate", Math.abs(car.heading) < 1e-6);
 }
 
+// ---- 7. the track surface -----------------------------------------------
+{
+  const circuit = buildWorld("circuit", 7);
+  const line = circuit.race!.line;
+  const on = circuit.onTarmac(line[10].x, line[10].z);
+  // 30 m off the centreline is unambiguously in the field
+  const a = line[10];
+  const b = line[11];
+  const len = Math.hypot(b.x - a.x, b.z - a.z) || 1;
+  const off = circuit.onTarmac(
+    a.x + (-(b.z - a.z) / len) * 30,
+    a.z + ((b.x - a.x) / len) * 30,
+  );
+  console.log(`circuit surface`);
+  console.log(`  on the centreline: ${on}, 30 m off it: ${off}`);
+  check("the ribbon is tarmac and the field is not", on && !off);
+}
+
+// ---- 8. running wide costs you the speed --------------------------------
+{
+  const mile = buildWorld("mile", 1);
+  const car = createCarState(mile.spawn);
+  car.speed = 60; // 216 km/h down the runway
+  // put it well off the side of the 26 m strip
+  car.x = 40;
+  let scrubbed = 60;
+  for (let t = 0; t < 3; t += DT) {
+    scrubbed = stepCar(car, {
+      dt: DT,
+      input: { steer: 0, throttle: 1, brake: 0 },
+      world: mile,
+      // the powertrain keeps asking for the scrubbed speed back, exactly as
+      // DriveCanvas feeds it in
+      engineSpeed: scrubbed,
+      wheelbaseM: WHEELBASE,
+      halfW: 0.92,
+      halfL: HALF_L,
+      coasting: false,
+    });
+  }
+  console.log(`3 s on the grass from 216 km/h, throttle pinned`);
+  console.log(`  off track: ${car.offTrack}, speed now ${(scrubbed * 3.6).toFixed(0)} km/h`);
+  check("the grass scrubs it to a crawl", car.offTrack && scrubbed * 3.6 < 50);
+}
+
+// ---- 9. ...and the tarmac does not --------------------------------------
+{
+  const mile = buildWorld("mile", 1);
+  const car = createCarState(mile.spawn);
+  car.speed = 60;
+  let scrubbed = 60;
+  for (let t = 0; t < 3; t += DT) {
+    scrubbed = stepCar(car, {
+      dt: DT,
+      input: { steer: 0, throttle: 1, brake: 0 },
+      world: mile,
+      engineSpeed: 60,
+      wheelbaseM: WHEELBASE,
+      halfW: 0.92,
+      halfL: HALF_L,
+      coasting: false,
+    });
+  }
+  console.log(`the same 3 s on the runway`);
+  console.log(`  off track: ${car.offTrack}, speed now ${(scrubbed * 3.6).toFixed(0)} km/h`);
+  check("the black stuff costs nothing", !car.offTrack && scrubbed > 59);
+}
+
 const failed = results.filter(([, ok]) => !ok);
 console.log(
   failed.length

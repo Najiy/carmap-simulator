@@ -17,6 +17,7 @@ import {
   type RoomSnapshot,
 } from "../multiplayer/room";
 import { LobbyBrowser, LobbyRoom } from "./DriveLobby";
+import { bindGearKeys } from "../lib/gearKeys";
 import type { CameraMode, DriveHud, RaceSetup, RawInput } from "./DriveCanvas";
 
 // three.js only arrives when someone actually drives
@@ -34,6 +35,7 @@ const EMPTY_HUD: DriveHud = {
   distance: 0,
   reversing: false,
   slip: 0,
+  offTrack: false,
   ready: false,
   loadPct: 0,
   error: null,
@@ -333,24 +335,14 @@ export default function DrivePanel({
     };
   }, []);
 
-  // gearbox keys live in Controls (the sidebar) on desktop, but the game has
-  // to work on its own — bind the shifts here too
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.repeat) return;
-      if ((e.target as HTMLElement)?.closest("input,textarea,select")) return;
-      const k = e.key.toLowerCase();
-      const manual = ["e", "shift", "q", "control"].includes(k) || /^[0-9]$/.test(k);
-      // grabbing a gear yourself takes it out of auto, the way pulling a
-      // paddle does — otherwise the box just shifts straight back
-      if (manual) useGameStore.getState().setAutoShift(false);
-      if (k === "e" || k === "shift") engine.shift(1);
-      else if (k === "q" || k === "control") engine.shift(-1);
-      else if (/^[0-9]$/.test(k)) engine.setGear(Number(k) - 1);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  // The gearbox keys are bound once for the whole app — the sidebar wants
+  // them too, and two listeners meant one press ran two relative shifts.
+  // Grabbing a gear by hand drops the box out of auto, the way pulling a
+  // paddle does; otherwise it would just change straight back.
+  useEffect(
+    () => bindGearKeys({ onShift: () => setAutoShift(false) }),
+    [setAutoShift],
+  );
 
   // the sidebar owns this on desktop, but the game has to stand alone
   useEffect(() => {
@@ -613,6 +605,22 @@ export default function DrivePanel({
           />
         </div>
       </div>
+
+      {/* off the track — the speed is already bleeding away, say why */}
+      <AnimatePresence>
+        {hud.offTrack && hud.speedKph > 15 && (
+          <motion.div
+            initial={{ opacity: 0, y: -6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="pointer-events-none absolute inset-x-0 top-[30%] grid place-items-center"
+          >
+            <div className="rounded border border-warn/60 bg-page/70 px-3 py-1.5 text-sm font-bold uppercase tracking-wider text-warn backdrop-blur">
+              Off track
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* race overlays */}
       {race && (

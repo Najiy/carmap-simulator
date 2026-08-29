@@ -33,6 +33,8 @@ export interface CarState {
   hitCones: number;
   /** set for one frame when the car lands a solid hit */
   impact: number;
+  /** on the grass — the HUD warns, and the physics is punishing it */
+  offTrack: boolean;
 }
 
 export interface DriveInput {
@@ -55,6 +57,7 @@ export function createCarState(spawn: World["spawn"]): CarState {
     reversing: false,
     hitCones: 0,
     impact: 0,
+    offTrack: false,
   };
 }
 
@@ -64,6 +67,16 @@ export function createCarState(spawn: World["spawn"]): CarState {
  * reciprocal of that time constant.
  */
 const YAW_RESPONSE = 7;
+
+/**
+ * The penalty for being off the black stuff. Speed decays hard toward a crawl
+ * and the front axle stops biting, so cutting a corner always costs more than
+ * the metres it saves — without which a race is just a contest of who is
+ * willing to ignore the track.
+ */
+const GRASS_CAP = 12; // m/s — about 43 km/h
+const GRASS_DRAG = 2.4; // per second, toward the cap
+const GRASS_GRIP = 0.55;
 
 /** front wheels stop biting long before the wheel does — speed-sensitive */
 const steerLimit = (speedMs: number) =>
@@ -100,6 +113,7 @@ export function stepCar(car: CarState, a: StepArgs): number {
     car.reversing = false;
     car.slip = 0;
     car.yawRate = 0;
+    car.offTrack = false;
     car.roll += (0 - car.roll) * clamp(dt * 5, 0, 1);
     car.pitch += (0 - car.pitch) * clamp(dt * 4, 0, 1);
     return 0;
@@ -127,6 +141,15 @@ export function stepCar(car: CarState, a: StepArgs): number {
     car.speed = a.coasting ? car.speed * (1 - clamp(dt * 0.35, 0, 1)) : a.engineSpeed;
   }
 
+  // off the track: scrub hard toward a crawl. The returned speed is fed back
+  // into the powertrain by the caller, so the revs drop with it and you have
+  // to drive out of it rather than just waiting.
+  car.offTrack = !world.onTarmac(car.x, car.z);
+  if (car.offTrack && !car.reversing && Math.abs(car.speed) > GRASS_CAP) {
+    const cap = Math.sign(car.speed) * GRASS_CAP;
+    car.speed += (cap - car.speed) * clamp(dt * GRASS_DRAG, 0, 1);
+  }
+
   const v = car.speed;
   const absV = Math.abs(v);
   const halfWb = a.wheelbaseM / 2;
@@ -146,7 +169,8 @@ export function stepCar(car: CarState, a: StepArgs): number {
   // ...and grip decides how much of it the car actually gets. Past the limit
   // the surplus becomes slip angle instead of rotation, which is the tail
   // stepping out; power-on makes it worse, as it should.
-  const gripYaw = absV > 0.5 ? (9.2 * (1 + 0.35 * input.brake)) / Math.max(absV, 1) : yawWanted;
+  const grip = 9.2 * (1 + 0.35 * input.brake) * (car.offTrack ? GRASS_GRIP : 1);
+  const gripYaw = absV > 0.5 ? grip / Math.max(absV, 1) : yawWanted;
   const yawGrip = clamp(yawWanted, -gripYaw, gripYaw);
   const surplus = yawWanted - yawGrip;
   car.slip += (surplus * 0.55 - car.slip * (2.4 + absV * 0.05)) * dt;

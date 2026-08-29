@@ -67,12 +67,27 @@ of rotation, which is the tail stepping out.
 steady-state radius is L/tan(δ) where grip allows, that the rear wheels carry
 no slip angle (the property that separates a rear-axle pivot from a car that
 slews about its middle), that it understeers past the limit, that yaw builds
-rather than snaps, and that a parked car cannot rotate.
+rather than snaps, that a parked car cannot rotate, and that the grass costs
+you the speed while the tarmac does not.
 
-The chase camera deliberately does **not** sit on the car's heading. Welded to
-it, the body is bolted to the screen and the world just swings around it — you
-never see the car turn. It eases toward the car's *course* instead, so turn-in
-shows you the flank and a slide shows you the whole side of the car.
+**A heading of `h` is a scene rotation of `-h`.** The physics travels along
+`(sin h, -cos h)`, but three.js maps a model's nose (local -Z, where
+`carModel.ts` aligns it) to `(-sin h, -cos h)`. Rotating by `+h` mirrors the
+car: dead right at heading 0, and wrong by *twice* the heading the moment it
+turns — which looks like the model ignoring the physics entirely.
+`scripts/yaw-check.mjs` asserts the sign.
+
+The car is then squared up to the camera, the way a racing game does it: the
+holder carries the true heading (the collisions, the ghosts and the network all
+need it) and the shell is counter-rotated onto the camera's axis, so the car
+always points up the screen. The only angle you ever see on it is a few degrees
+leaned into the corner, and a spin turns the world around the car rather than
+swinging it side-on.
+
+Running wide is punished. Every scene knows where its tarmac is, and off it the
+car is scrubbed toward a crawl with the front axle half-gripping — 216 km/h
+becomes 43 in three seconds. Without that, a race is just a contest of who is
+most willing to ignore the track.
 
 The gearbox runs **AUTO or MANUAL** — auto changes up at the shift point the
 dyno computes for the current tune, and grabbing a gear yourself drops it into

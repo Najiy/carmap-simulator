@@ -22,12 +22,24 @@ import type { RaceRoom } from "../multiplayer/room";
 export type CameraMode = "chase" | "bonnet" | "orbit";
 
 /**
- * How quickly the chase camera takes up the car's course, per second. Lower
- * lets the body swing further round in frame before the camera catches up;
- * too low and it feels seasick. At 1 rad/s of yaw this settles about 16°
- * behind, which is enough to read the car turning under you.
+ * How quickly the chase camera takes up the car's heading, per second, and
+ * the furthest it is ever allowed to fall behind. Together these keep the car
+ * pointing up the screen: a hard corner angles it a handful of degrees into
+ * the turn, and a spin turns the world around it rather than swinging the car
+ * side-on.
  */
-const CAM_YAW_LAG = 3.5;
+const CAM_YAW_LAG = 9;
+const CAM_YAW_MAX = 0.12; // ~7°
+
+/**
+ * The body is squared up to the camera, so this lean is the only angle you
+ * ever see on it: a few degrees into the corner, the way a racing game does
+ * it. It is a lie about where the car is pointing, and it is what makes a
+ * turn read without the car swinging round to a side-on view.
+ */
+const LEAN_STEER = 0.1;
+const LEAN_SLIP = 0.22;
+const LEAN_MAX = 0.13; // ~7.5°
 
 /**
  * A soft blob under the car. Real shadow mapping on a photogrammetry mesh
@@ -75,6 +87,8 @@ export interface DriveHud {
   reversing: boolean;
   /** how sideways the car is right now, 0..1 — the HUD shows it as a bar */
   slip: number;
+  /** on the grass, and being scrubbed for it */
+  offTrack: boolean;
   ready: boolean;
   loadPct: number;
   error: string | null;
@@ -230,6 +244,7 @@ export default function DriveCanvas({
         distance,
         reversing: state.reversing,
         slip: Math.min(1, Math.abs(state.slip) / 0.45),
+        offTrack: state.offTrack,
         ready,
         loadPct,
         error: loadErr,
@@ -471,12 +486,19 @@ export default function DriveCanvas({
       distance += Math.abs(state.speed) * dt;
 
       holder.position.set(state.x, 0, state.z);
-      holder.rotation.y = state.heading;
-      body.rotation.set(state.pitch, 0, state.roll);
+      // A heading of h is a scene rotation of -h: the physics travels along
+      // (sin h, -cos h) but three.js maps a model's nose (local -Z) to
+      // (-sin h, -cos h). Using +h mirrors the car — dead right at heading 0,
+      // and wrong by twice the heading the moment it turns.
+      // See scripts/yaw-check.mjs.
+      holder.rotation.y = -state.heading;
 
       const sinH = Math.sin(state.heading);
       const cosH = Math.cos(state.heading);
       const speed01 = clamp(Math.abs(state.speed) / 60, 0, 1);
+
+      // the axis the shot is taken down; the chase view overrides it
+      let viewYaw = state.heading;
 
       if (camRef.current === "bonnet") {
         cam.position.set(state.x + sinH * 0.2, 1.16, state.z - cosH * 0.2);
@@ -490,17 +512,19 @@ export default function DriveCanvas({
         );
         cam.lookAt(state.x, 0.85, state.z);
       } else {
-        // Chase. The camera must NOT sit on the car's heading: welded to it,
-        // the body is bolted to the screen and the world just swings around
-        // it — you never see the car turn. Instead it eases toward where the
-        // car is *going* (heading minus the slip it is carrying), so turn-in
-        // shows you the flank of the car and a slide shows you its side.
-        const wanted = state.heading - state.slip;
-        let d = wanted - camYaw;
+        // Chase. camYaw is where the shot is taken from; the body is then
+        // squared up to it below, so the car always points up the screen.
+        let d = state.heading - camYaw;
         while (d > Math.PI) d -= Math.PI * 2;
         while (d < -Math.PI) d += Math.PI * 2;
         camYaw += d * clamp(dt * CAM_YAW_LAG, 0, 1);
+        camYaw = clamp(
+          camYaw,
+          state.heading - CAM_YAW_MAX,
+          state.heading + CAM_YAW_MAX,
+        );
 
+        viewYaw = camYaw;
         const sinC = Math.sin(camYaw);
         const cosC = Math.cos(camYaw);
         const back = 7.2 + speed01 * 2.6;
@@ -509,14 +533,34 @@ export default function DriveCanvas({
           2.75 - speed01 * 0.45,
           state.z + cosC * back,
         );
-        if (camPlaced) cam.position.lerp(camPos, clamp(dt * 6, 0, 1));
-        else {
-          camYaw = wanted;
-          cam.position.copy(camPos);
+        // Set the position outright rather than easing toward it. camYaw is
+        // already the smoothed, clamped angle; lerping the Cartesian position
+        // on top of it adds a *second* lag, and in a fast spin the target
+        // sweeps round the car quicker than the lerp follows — which swings
+        // the camera out to the side and shows the car's flank.
+        if (!camPlaced) {
+          camYaw = state.heading;
           camPlaced = true;
         }
+        cam.position.copy(camPos);
         cam.lookAt(state.x + sinC * 5.5, 1.15, state.z - cosC * 5.5);
       }
+      // The car faces straight up the screen whatever the physics is doing.
+      // holder carries the true heading — the ghosts, the collisions and the
+      // network all need that — so the shell is counter-rotated onto the
+      // camera's axis, and the only angle you ever see is the few degrees it
+      // is leaned into the corner.
+      const lean = clamp(
+        smooth.steer * LEAN_STEER + state.slip * LEAN_SLIP,
+        -LEAN_MAX,
+        LEAN_MAX,
+      );
+      body.rotation.set(
+        state.pitch,
+        state.heading - viewYaw - lean,
+        state.roll,
+      );
+
       // a touch of fov with speed — cheap, and it does most of the work
       cam.fov = 62 + speed01 * 15;
       cam.updateProjectionMatrix();

@@ -91,6 +91,12 @@ export interface World {
   sky: number;
   /** present only on scenes you can hold a race on */
   race: RaceLayout | null;
+  /**
+   * Is this point on the black stuff? Everything else is grass, and the car
+   * is scrubbed hard for being on it — cutting a corner has to cost more
+   * than it gains, or a race is just a contest of who ignores the track.
+   */
+  onTarmac: (x: number, z: number) => boolean;
 }
 
 /** small deterministic PRNG so a seed always gives the same scene */
@@ -113,6 +119,26 @@ const GRASS = 0x3c4a33;
 const KERB_A = 0xc4402f;
 const KERB_B = 0xe8e6dc;
 
+/** shortest distance from a point to a polyline, squared */
+function dist2ToLine(line: Vec2[], x: number, z: number, closed: boolean) {
+  let best = Infinity;
+  const n = line.length;
+  const last = closed ? n : n - 1;
+  for (let i = 0; i < last; i++) {
+    const a = line[i];
+    const b = line[(i + 1) % n];
+    const dx = b.x - a.x;
+    const dz = b.z - a.z;
+    const d2 = dx * dx + dz * dz || 1;
+    const t = Math.min(1, Math.max(0, ((x - a.x) * dx + (z - a.z) * dz) / d2));
+    const ex = x - (a.x + dx * t);
+    const ez = z - (a.z + dz * t);
+    const e = ex * ex + ez * ez;
+    if (e < best) best = e;
+  }
+  return best;
+}
+
 /** flat-shaded material, so the low-poly scenery reads as deliberate */
 const flat = (color: number) => new THREE.MeshLambertMaterial({ color });
 
@@ -133,6 +159,7 @@ export function buildWorld(id: SceneId, seed = 1): World {
     radius: 900,
     sky: 0x39424e,
     race: null,
+    onTarmac: () => true,
   };
 
   if (id === "airfield") buildAirfield(world, rand);
@@ -279,6 +306,7 @@ function buildAirfield(w: World, rand: () => number) {
   for (let i = -12; i < 12; i++) paint(w.group, 0, i * 40, 0.5, 20);
 
   w.spawn = { x: 0, z: 60, heading: 0 };
+  w.onTarmac = (x, z) => Math.abs(x) <= 280 && Math.abs(z) <= 280;
 }
 
 function buildCircuit(w: World, rand: () => number) {
@@ -360,6 +388,9 @@ function buildCircuit(w: World, rand: () => number) {
   w.spawn = { x: s.x, z: s.y, heading };
 
   const line: Vec2[] = pts.map((p) => ({ x: p.x, z: p.y }));
+  // the kerbs are part of the track; a wheel past them is on the grass
+  const edge = (HALF + 1.2) ** 2;
+  w.onTarmac = (x, z) => dist2ToLine(line, x, z, true) <= edge;
   w.race = {
     kind: "lap",
     line,
@@ -432,6 +463,7 @@ function buildCity(w: World, rand: () => number) {
   block(w, half + t / 2, 0, t, 6, span + t * 2, 0x3f434b);
 
   w.spawn = { x: -half + ROAD / 2, z: half - 40, heading: 0 };
+  w.onTarmac = (x, z) => Math.abs(x) <= half && Math.abs(z) <= half;
 }
 
 function buildMile(w: World, rand: () => number) {
@@ -483,6 +515,7 @@ function buildMile(w: World, rand: () => number) {
   }
 
   w.spawn = { x: 0, z: 60, heading: 0 };
+  w.onTarmac = (x, z) => Math.abs(x) <= W / 2 && z <= 80 && z >= 80 - L;
 
   // a dash: the line runs from the start stripe to the far distance board
   const line: Vec2[] = [
