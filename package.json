@@ -13,13 +13,16 @@
     "framer-motion": "^12.18.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "three": "^0.185.1",
     "zustand": "^5.0.14"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.10",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
+    "@types/three": "^0.185.4",
     "@vitejs/plugin-react": "^4.5.2",
+    "gltfpack": "^1.2.0",
     "tailwindcss": "^4.1.10",
     "typescript": "~5.8.3",
     "vite": "^6.3.5"

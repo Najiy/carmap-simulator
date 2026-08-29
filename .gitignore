@@ -4,3 +4,7 @@ dist
 .DS_Store
 .firebase
 tsconfig.tsbuildinfo
+
+# raw photogrammetry scans (hundreds of MB); the web-sized GLBs the app
+# actually loads are committed under public/models
+src/models

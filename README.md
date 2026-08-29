@@ -39,3 +39,34 @@ AFR targets first (log → correct → repeat), then advance timing at load unti
 the first hint of knock and back off 2°, raising boost only when the map
 under it is proven. The **Pro tune** preset shows what finished maps look
 like; the base calibration has a classic lean top-end waiting to be found.
+
+## Garage
+
+The **Garage** tab lists every car in the catalogue (`src/engine/cars.ts`) and
+opens the ones with a 3D model in a full-bleed WebGL viewer, with the specs and
+actions floating over the render. three.js is lazy-loaded, so it only reaches
+the browser when someone actually opens a car.
+
+### Adding a car model
+
+Models are served from `public/models` and fetched on demand — never bundled.
+A raw photogrammetry scan is far too big to ship (the Focus ST arrived as a
+468 MB GLB: 13 M triangles and an 8192² texture), so it goes through:
+
+```sh
+# 1. decimate to ~260 k triangles and meshopt-compress the geometry
+node_modules/.bin/gltfpack -i scan.glb -o public/models/car.glb -si 0.02 -c
+
+# 2. gltfpack's node build can't re-encode textures, so shrink it separately
+ffmpeg -i tex8k.jpg -vf scale=4096:4096:flags=lanczos -q:v 4 tex4k.jpg
+node scripts/glb-retexture.cjs public/models/car.glb tex4k.jpg out.glb
+```
+
+That lands the Focus ST at 3.3 MB. Then add a `model` entry to the car in
+`src/engine/cars.ts`. Scans usually need two more things:
+
+- `upAxis: "z"` — photogrammetry tools export Z-up and rotate nothing.
+- `crop` — a box, in the file's own coordinates, keeping the subject and
+  dropping the car park around it. `scripts/glb-density.cjs` and
+  `scripts/glb-projections.cjs` print density maps of a scan to find one.
+

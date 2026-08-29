@@ -17,18 +17,32 @@ import RacePanel from "./components/RacePanel";
 import AcademyPanel from "./components/AcademyPanel";
 import DriverName from "./components/DriverName";
 import MobileDock from "./components/MobileDock";
+import GaragePanel from "./components/GaragePanel";
 import { useGameStore } from "./store/gameStore";
 import { useMediaQuery } from "./lib/useMediaQuery";
 import type { Exercise } from "./engine/exercises";
 
-type Tab = "fuel" | "ign" | "afr" | "dyno" | "race" | "learn" | "guide";
-type Section = "tune" | "race" | "learn";
+type Tab =
+  | "garage"
+  | "fuel"
+  | "ign"
+  | "afr"
+  | "dyno"
+  | "race"
+  | "learn"
+  | "guide";
+type Section = "garage" | "tune" | "race" | "learn";
 
 const SECTIONS: {
   id: Section;
   label: string;
   tabs: { id: Tab; label: string }[];
 }[] = [
+  {
+    id: "garage",
+    label: "Garage",
+    tabs: [{ id: "garage", label: "Garage" }],
+  },
   {
     id: "tune",
     label: "Tune",
@@ -83,6 +97,7 @@ export default function App() {
   const section = sectionOf(tab);
   const activeSection = SECTIONS.find((s) => s.id === section)!;
   const lastTabBySection = useRef<Record<Section, Tab>>({
+    garage: "garage",
     tune: "fuel",
     race: "race",
     learn: "learn",
@@ -285,6 +300,13 @@ export default function App() {
                 transition={{ duration: 0.15 }}
                 className="h-full"
               >
+                {tab === "garage" && (
+                  <GaragePanel
+                    currentEngineId={engineId}
+                    onGotoEngine={swapEngine}
+                    onGotoTab={(t) => gotoTab(t)}
+                  />
+                )}
                 {tab === "fuel" && (
                   <MapEditor
                     axes={axes}
