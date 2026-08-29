@@ -21,6 +21,8 @@ export interface CarState {
   heading: number;
   /** how far the body is rotated away from its direction of travel */
   slip: number;
+  /** rad/s the body is actually rotating at — lags the steering demand */
+  yawRate: number;
   /** cosmetic: body roll and pitch under load, radians */
   roll: number;
   pitch: number;
@@ -46,6 +48,7 @@ export function createCarState(spawn: World["spawn"]): CarState {
     z: spawn.z,
     heading: spawn.heading,
     slip: 0,
+    yawRate: 0,
     roll: 0,
     pitch: 0,
     speed: 0,
@@ -54,6 +57,13 @@ export function createCarState(spawn: World["spawn"]): CarState {
     impact: 0,
   };
 }
+
+/**
+ * How fast the body takes up the yaw rate the steering is asking for. A real
+ * car settles into a corner over roughly a fifth of a second; this is the
+ * reciprocal of that time constant.
+ */
+const YAW_RESPONSE = 7;
 
 /** front wheels stop biting long before the wheel does — speed-sensitive */
 const steerLimit = (speedMs: number) =>
@@ -89,6 +99,7 @@ export function stepCar(car: CarState, a: StepArgs): number {
     car.speed = 0;
     car.reversing = false;
     car.slip = 0;
+    car.yawRate = 0;
     car.roll += (0 - car.roll) * clamp(dt * 5, 0, 1);
     car.pitch += (0 - car.pitch) * clamp(dt * 4, 0, 1);
     return 0;
@@ -118,6 +129,15 @@ export function stepCar(car: CarState, a: StepArgs): number {
 
   const v = car.speed;
   const absV = Math.abs(v);
+  const halfWb = a.wheelbaseM / 2;
+
+  // Where the rear axle is *before* this step. A car turns about its back
+  // wheels, so that is the point the whole step pivots around — and it has to
+  // be measured on the old heading, or the offset just cancels itself out and
+  // the car slews about its middle like a tank.
+  const h0 = car.heading;
+  const rx = car.x - Math.sin(h0) * halfWb;
+  const rz = car.z + Math.cos(h0) * halfWb;
 
   // steering: the bicycle model gives the yaw rate the front wheels ask for
   const steer = input.steer * steerLimit(absV);
@@ -127,32 +147,35 @@ export function stepCar(car: CarState, a: StepArgs): number {
   // the surplus becomes slip angle instead of rotation, which is the tail
   // stepping out; power-on makes it worse, as it should.
   const gripYaw = absV > 0.5 ? (9.2 * (1 + 0.35 * input.brake)) / Math.max(absV, 1) : yawWanted;
-  const yaw = clamp(yawWanted, -gripYaw, gripYaw);
-  const surplus = yawWanted - yaw;
+  const yawGrip = clamp(yawWanted, -gripYaw, gripYaw);
+  const surplus = yawWanted - yawGrip;
   car.slip += (surplus * 0.55 - car.slip * (2.4 + absV * 0.05)) * dt;
   car.slip = clamp(car.slip, -0.7, 0.7);
   if (input.throttle > 0.7 && absV > 4)
     car.slip += surplus * input.throttle * 0.35 * dt;
 
-  car.heading += (yaw + car.slip * 1.4) * dt;
+  // A car has yaw inertia. It takes a beat to take a set on turn-in and
+  // another to stop rotating when you unwind, and chasing the demand
+  // instantly is exactly what makes a car feel like it is on rails.
+  const yawDemand = yawGrip + car.slip * 1.4;
+  car.yawRate += (yawDemand - car.yawRate) * clamp(dt * YAW_RESPONSE, 0, 1);
+  car.heading = h0 + car.yawRate * dt;
 
-  // A car pivots about its rear axle, not its middle: turn the wheel and the
-  // nose swings wide while the tail cuts the corner. Integrating the body
-  // centre directly makes it slew like a tank, so move the rear axle and put
-  // the body back on the end of it.
-  const halfWb = a.wheelbaseM / 2;
-  const rx = car.x - Math.sin(car.heading) * halfWb;
-  const rz = car.z + Math.cos(car.heading) * halfWb;
-
-  // it travels along its heading minus whatever slip it is carrying
-  const course = car.heading - car.slip;
-  const nx = rx + Math.sin(course) * v * dt + Math.sin(car.heading) * halfWb;
-  const nz = rz - Math.cos(course) * v * dt - Math.cos(car.heading) * halfWb;
+  // the rear axle travels along the heading it had, minus the slip it is
+  // carrying...
+  const course = h0 - car.slip;
+  const nrx = rx + Math.sin(course) * v * dt;
+  const nrz = rz - Math.cos(course) * v * dt;
+  // ...and the body finishes the step half a wheelbase ahead of it on the
+  // *new* heading. That difference is the nose swinging wide.
+  const nx = nrx + Math.sin(car.heading) * halfWb;
+  const nz = nrz - Math.cos(car.heading) * halfWb;
 
   const scrub = resolve(car, nx, nz, a);
 
-  // cosmetic weight transfer — small, but it is most of what sells the speed
-  const rollTarget = clamp(-yaw * absV * 0.05, -0.09, 0.09);
+  // cosmetic weight transfer — small, but it is most of what sells the speed.
+  // Roll follows lateral acceleration, which is yaw rate times road speed.
+  const rollTarget = clamp(-car.yawRate * absV * 0.05, -0.09, 0.09);
   car.roll += (rollTarget - car.roll) * clamp(dt * 5, 0, 1);
   const pitchTarget = clamp((input.brake * 0.035 - input.throttle * 0.02) * Math.min(1, absV / 8), -0.05, 0.05);
   car.pitch += (pitchTarget - car.pitch) * clamp(dt * 4, 0, 1);
@@ -174,6 +197,7 @@ export function stepCar(car: CarState, a: StepArgs): number {
     car.z = world.spawn.z;
     car.heading = world.spawn.heading;
     car.slip = 0;
+    car.yawRate = 0;
     car.speed = 0;
     return 0;
   }
@@ -222,5 +246,6 @@ function resolve(car: CarState, nx: number, nz: number, a: StepArgs): number {
   car.impact = Math.min(1, before / 18);
   car.speed *= 0.25;
   car.slip *= 0.3;
+  car.yawRate *= 0.3;
   return Math.abs(car.speed);
 }

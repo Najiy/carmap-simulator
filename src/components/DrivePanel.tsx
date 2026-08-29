@@ -7,6 +7,7 @@ import type { Maps } from "../engine/defaults";
 import { engineSound } from "../engine/sound";
 import { useTuneStore } from "../store/tuneStore";
 import { SCENES, type SceneId } from "../game/world";
+import { computeShiftRpm } from "../engine/race";
 import { runDyno } from "../engine/dyno";
 import { buildAxes } from "../engine/axes";
 import { useGameStore } from "../store/gameStore";
@@ -63,6 +64,9 @@ export default function DrivePanel({
   const s = useEngineSnapshot();
   const muted = useTuneStore((st) => st.muted);
   const setMuted = useTuneStore((st) => st.setMuted);
+  // shared with the drag strip, so the box behaves the same in both
+  const autoShift = useGameStore((st) => st.autoShift);
+  const setAutoShift = useGameStore((st) => st.setAutoShift);
 
   const [sceneId, setSceneId] = useState<SceneId>("airfield");
   const [seed, setSeed] = useState(1);
@@ -97,6 +101,15 @@ export default function DrivePanel({
       return Math.round(runDyno(spec, axes, maps, s.wastegateKpa, 0).peakHp.v);
     } catch {
       return 0;
+    }
+  }, [spec, maps, s.wastegateKpa]);
+
+  // where the automatic changes up — power has faded past peak by here
+  const shiftRpm = useMemo(() => {
+    try {
+      return computeShiftRpm(spec, buildAxes(spec), maps, s.wastegateKpa);
+    } catch {
+      return Math.round(spec.redline * 0.94);
     }
   }, [spec, maps, s.wastegateKpa]);
 
@@ -327,6 +340,10 @@ export default function DrivePanel({
       if (e.repeat) return;
       if ((e.target as HTMLElement)?.closest("input,textarea,select")) return;
       const k = e.key.toLowerCase();
+      const manual = ["e", "shift", "q", "control"].includes(k) || /^[0-9]$/.test(k);
+      // grabbing a gear yourself takes it out of auto, the way pulling a
+      // paddle does — otherwise the box just shifts straight back
+      if (manual) useGameStore.getState().setAutoShift(false);
       if (k === "e" || k === "shift") engine.shift(1);
       else if (k === "q" || k === "control") engine.shift(-1);
       else if (/^[0-9]$/.test(k)) engine.setGear(Number(k) - 1);
@@ -409,6 +426,8 @@ export default function DrivePanel({
           seed={seed}
           camera={camera}
           input={input}
+          autoShift={autoShift}
+          shiftRpm={shiftRpm}
           onHud={onHud}
           resetToken={resetToken}
           race={mode === "race" ? raceSetup : null}
@@ -477,6 +496,26 @@ export default function DrivePanel({
         )}
 
         <div className="pointer-events-auto ml-auto flex gap-1.5">
+          <div className="flex overflow-hidden rounded border border-grid bg-surface/85 text-[11px] backdrop-blur">
+            {([true, false] as const).map((auto) => (
+              <button
+                key={String(auto)}
+                onClick={() => setAutoShift(auto)}
+                title={
+                  auto
+                    ? `Automatic — changes up at ${shiftRpm} rpm`
+                    : "Manual — Q and E, or the gear strip"
+                }
+                className={`px-2 py-1.5 font-semibold transition-colors ${
+                  autoShift === auto
+                    ? "bg-s2/25 text-s2"
+                    : "text-muted hover:text-ink2"
+                }`}
+              >
+                {auto ? "AUTO" : "MANUAL"}
+              </button>
+            ))}
+          </div>
           <div className="flex overflow-hidden rounded border border-grid bg-surface/85 text-[11px] backdrop-blur">
             {CAMERAS.map((c) => (
               <button
@@ -565,7 +604,13 @@ export default function DrivePanel({
             <Bar label="BRK" v={s.brake} color="bg-crit" />
             <Bar label="SLIP" v={hud.slip} color="bg-s3" />
           </div>
-          <TouchPad input={input} onShift={(d) => engine.shift(d)} />
+          <TouchPad
+            input={input}
+            onShift={(d) => {
+              setAutoShift(false);
+              engine.shift(d);
+            }}
+          />
         </div>
       </div>
 
@@ -703,8 +748,9 @@ export default function DrivePanel({
                 START ENGINE
               </button>
               <p className="mt-2 max-w-xs text-[11px] leading-relaxed text-muted">
-                W / S to drive and brake, A / D to steer, Q and E for gears.
-                Hold S at a standstill for reverse.
+                W / S to drive and brake, A / D to steer. The box is on{" "}
+                {autoShift ? "AUTO" : "MANUAL"} — Q and E to change gear
+                yourself. Hold S at a standstill for reverse.
               </p>
             </div>
           </motion.div>
@@ -727,6 +773,7 @@ export default function DrivePanel({
                 ["A / D / ← →", "steer"],
                 ["Q / E", "shift down / up"],
                 ["1–6, 0", "select a gear, 0 = neutral"],
+                ["AUTO / MANUAL", `auto changes up at ${shiftRpm} rpm`],
                 ["R", "back to the grid"],
                 ["C", "change camera"],
               ].map(([k, v]) => (
@@ -759,7 +806,10 @@ export default function DrivePanel({
             (g) => (
               <button
                 key={g}
-                onClick={() => engine.setGear(g)}
+                onClick={() => {
+                  setAutoShift(false);
+                  engine.setGear(g);
+                }}
                 className={`tabular h-7 w-7 rounded text-xs font-bold transition-colors ${
                   s.gear === g ? "bg-s1 text-white" : "bg-raised text-muted hover:text-ink"
                 }`}
@@ -769,7 +819,10 @@ export default function DrivePanel({
             ),
           )}
           <button
-            onClick={() => engine.setGear(-1)}
+            onClick={() => {
+              setAutoShift(false);
+              engine.setGear(-1);
+            }}
             className={`h-7 w-7 rounded text-xs font-bold transition-colors ${
               s.gear < 0 ? "bg-s1 text-white" : "bg-raised text-muted hover:text-ink"
             }`}

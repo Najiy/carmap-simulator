@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { clamp } from "../engine/axes";
 import { engine } from "../engine/store";
+import { GEARBOX } from "../engine/engines";
 import type { Car } from "../engine/cars";
 import { disposeTree, loadCarModel } from "../game/carModel";
 import { buildWorld, disposeWorld, type SceneId, type World } from "../game/world";
@@ -19,6 +20,14 @@ import {
 import type { RaceRoom } from "../multiplayer/room";
 
 export type CameraMode = "chase" | "bonnet" | "orbit";
+
+/**
+ * How quickly the chase camera takes up the car's course, per second. Lower
+ * lets the body swing further round in frame before the camera catches up;
+ * too low and it feels seasick. At 1 rad/s of yaw this settles about 16°
+ * behind, which is enough to read the car turning under you.
+ */
+const CAM_YAW_LAG = 3.5;
 
 /**
  * A soft blob under the car. Real shadow mapping on a photogrammetry mesh
@@ -110,6 +119,8 @@ export default function DriveCanvas({
   seed,
   camera: cameraMode,
   input,
+  autoShift,
+  shiftRpm,
   onHud,
   resetToken,
   race,
@@ -123,6 +134,10 @@ export default function DriveCanvas({
   race?: RaceSetup | null;
   /** live controls, read every frame — a ref so input never re-renders */
   input: React.RefObject<RawInput>;
+  /** let the gearbox shift itself */
+  autoShift: boolean;
+  /** rpm the auto changes up at — the dyno's optimal shift point */
+  shiftRpm: number;
   onHud: (h: DriveHud) => void;
   /** bump to put the car back on the grid */
   resetToken: number;
@@ -140,6 +155,10 @@ export default function DriveCanvas({
   hudRef.current = onHud;
   const raceRef = useRef(race ?? null);
   raceRef.current = race ?? null;
+  const autoRef = useRef(autoShift);
+  autoRef.current = autoShift;
+  const shiftRpmRef = useRef(shiftRpm);
+  shiftRpmRef.current = shiftRpm;
 
   useEffect(() => {
     const el = host.current;
@@ -284,6 +303,10 @@ export default function DriveCanvas({
     // left the car doing
     engine.setRoadSpeed(0);
 
+    // the auto needs a beat between changes or it hunts on the threshold
+    let lastShiftAt = 0;
+    // the chase camera's own heading, easing toward the car's course
+    let camYaw = world.spawn.heading;
     const camPos = new THREE.Vector3();
     let orbit = 0;
     // the chase camera eases toward where it wants to be, but it has to
@@ -304,9 +327,11 @@ export default function DriveCanvas({
         state.z = world.spawn.z;
         state.heading = world.spawn.heading;
         state.slip = 0;
+        state.yawRate = 0;
         state.speed = 0;
         state.reversing = false;
         camPlaced = false;
+        camYaw = world.spawn.heading;
         engine.setRoadSpeed(0);
       }
 
@@ -404,6 +429,31 @@ export default function DriveCanvas({
       engine.setThrottle(smooth.throttle);
       engine.setBrake(smooth.brake);
 
+      // ---- the automatic ----------------------------------------------
+      // Change up at the dyno's optimal shift point. The downshift point is
+      // derived from the ratio step, so landing after a change is always
+      // comfortably below the up-shift point and the box never hunts.
+      if (autoRef.current && s.running && !state.reversing && !s.shifting) {
+        const top = GEARBOX.ratios.length - 1;
+        const g = s.gear;
+        if (g < 0) {
+          engine.setGear(0);
+          lastShiftAt = now;
+        } else if (now - lastShiftAt > 380) {
+          const up = shiftRpmRef.current;
+          if (g < top && s.rpm >= up) {
+            engine.shift(1);
+            lastShiftAt = now;
+          } else if (g > 0) {
+            const step = GEARBOX.ratios[g] / GEARBOX.ratios[g - 1];
+            if (s.rpm <= up * step * 0.82) {
+              engine.shift(-1);
+              lastShiftAt = now;
+            }
+          }
+        }
+      }
+
       const scrubbed = stepCar(state, {
         dt,
         input: smooth,
@@ -440,16 +490,32 @@ export default function DriveCanvas({
         );
         cam.lookAt(state.x, 0.85, state.z);
       } else {
-        // chase: sits back and drops as the speed builds, and aims just
-        // ahead of the car so the car sits low in frame with the road above
+        // Chase. The camera must NOT sit on the car's heading: welded to it,
+        // the body is bolted to the screen and the world just swings around
+        // it — you never see the car turn. Instead it eases toward where the
+        // car is *going* (heading minus the slip it is carrying), so turn-in
+        // shows you the flank of the car and a slide shows you its side.
+        const wanted = state.heading - state.slip;
+        let d = wanted - camYaw;
+        while (d > Math.PI) d -= Math.PI * 2;
+        while (d < -Math.PI) d += Math.PI * 2;
+        camYaw += d * clamp(dt * CAM_YAW_LAG, 0, 1);
+
+        const sinC = Math.sin(camYaw);
+        const cosC = Math.cos(camYaw);
         const back = 7.2 + speed01 * 2.6;
-        camPos.set(state.x - sinH * back, 2.75 - speed01 * 0.45, state.z + cosH * back);
+        camPos.set(
+          state.x - sinC * back,
+          2.75 - speed01 * 0.45,
+          state.z + cosC * back,
+        );
         if (camPlaced) cam.position.lerp(camPos, clamp(dt * 6, 0, 1));
         else {
+          camYaw = wanted;
           cam.position.copy(camPos);
           camPlaced = true;
         }
-        cam.lookAt(state.x + sinH * 5.5, 1.15, state.z - cosH * 5.5);
+        cam.lookAt(state.x + sinC * 5.5, 1.15, state.z - cosC * 5.5);
       }
       // a touch of fov with speed — cheap, and it does most of the work
       cam.fov = 62 + speed01 * 15;

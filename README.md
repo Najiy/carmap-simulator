@@ -58,8 +58,25 @@ layer adds only what a scene needs: where the car is pointing
 
 Steering is a kinematic bicycle model integrated at the **rear axle** — a car
 pivots about its back wheels, so the nose swings wide and the tail cuts the
-corner. Past the grip limit the surplus yaw becomes slip angle instead of
-rotation, which is the tail stepping out.
+corner. The body takes up the yaw rate the steering asks for over about a
+fifth of a second rather than instantly, which is what stops it feeling like
+it is on rails. Past the grip limit the surplus yaw becomes slip angle instead
+of rotation, which is the tail stepping out.
+
+`npx tsx scripts/steering-check.ts` asserts the geometry: that the
+steady-state radius is L/tan(δ) where grip allows, that the rear wheels carry
+no slip angle (the property that separates a rear-axle pivot from a car that
+slews about its middle), that it understeers past the limit, that yaw builds
+rather than snaps, and that a parked car cannot rotate.
+
+The chase camera deliberately does **not** sit on the car's heading. Welded to
+it, the body is bolted to the screen and the world just swings around it — you
+never see the car turn. It eases toward the car's *course* instead, so turn-in
+shows you the flank and a slide shows you the whole side of the car.
+
+The gearbox runs **AUTO or MANUAL** — auto changes up at the shift point the
+dyno computes for the current tune, and grabbing a gear yourself drops it into
+manual the way pulling a paddle does.
 
 Scenes are generated from a seed at load time (`game/world.ts`) — nothing to
 download. Four of them: an airfield with a skidpad and a slalom, a random test
