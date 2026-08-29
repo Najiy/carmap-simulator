@@ -89,6 +89,13 @@ car is scrubbed toward a crawl with the front axle half-gripping — 216 km/h
 becomes 43 in three seconds. Without that, a race is just a contest of who is
 most willing to ignore the track.
 
+On a touch screen the bottom corners belong to your thumbs: an analog
+steering stick on the left — analog matters, because a pair of left/right
+buttons can only ask for full lock and full lock is almost never what you want
+— with throttle, brake, the paddles and a reset on the right. The 🕹 button in
+the top bar forces them on or off for hybrid laptops. On a keyboard it is W to
+go, S or Space to brake, A/D to steer.
+
 The gearbox runs **AUTO or MANUAL** — auto changes up at the shift point the
 dyno computes for the current tune, and grabbing a gear yourself drops it into
 manual the way pulling a paddle does.

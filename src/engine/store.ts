@@ -173,6 +173,11 @@ class EngineSim {
   setBrake(v: number) {
     this.brake = clamp(v, 0, 1);
   }
+
+  /** newtons the brakes put down on the road — drive mode only */
+  private brakeForce() {
+    return this.brake * GEARBOX.massKg * 9.81 * GEARBOX.brakeG;
+  }
   setWastegate(kpa: number) {
     const max = this.spec.turbo?.maxKpa ?? 100;
     this.wastegateKpa = clamp(kpa, 100, max);
@@ -180,6 +185,9 @@ class EngineSim {
   setMode(mode: SimMode) {
     this.mode = mode;
     if (mode === "drive") {
+      // the dyno brake is a load on the rollers, not a pedal — dragging its
+      // setting onto the road would leave the car braking as it pulls away
+      this.brake = 0;
       this.gear = 0;
       const ratio = GEARBOX.ratios[0] * GEARBOX.final;
       this.speedMs = Math.max(0, (this.rpm / 9.549 / ratio) * GEARBOX.wheelRadiusM);
@@ -433,7 +441,7 @@ class EngineSim {
       if (this.gear < 0) {
         // neutral: nothing couples the crank to the wheels — the car
         // coasts and the engine free-revs
-        const drag = 0.42 * this.speedMs ** 2 + 165 + this.brake * 2500;
+        const drag = 0.42 * this.speedMs ** 2 + 165 + this.brakeForce();
         this.speedMs = Math.max(0, this.speedMs - (drag / GEARBOX.massKg) * dt);
         const loadTq = 4 + this.rpm * 0.004;
         const dOmega =
@@ -447,7 +455,7 @@ class EngineSim {
         const force =
           (Math.max(0, torque) * ratio * GEARBOX.driveline) /
           GEARBOX.wheelRadiusM;
-        const drag = 0.42 * this.speedMs ** 2 + 165 + this.brake * 2500;
+        const drag = 0.42 * this.speedMs ** 2 + 165 + this.brakeForce();
         const accel = (force - drag) / GEARBOX.massKg;
         this.speedMs = Math.max(0, this.speedMs + accel * dt);
         const rpmWheels = (this.speedMs / GEARBOX.wheelRadiusM) * ratio * 9.549;

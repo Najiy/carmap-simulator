@@ -685,5 +685,11 @@ export const GEARBOX = {
   final: 3.9,
   wheelRadiusM: 0.31,
   massKg: 1420,
+  /**
+   * g of deceleration at full brake. The drag strip already models this;
+   * drive mode used to add a flat 2500 N, which on 1420 kg is 1.8 m/s² — you
+   * could stand on the pedal at 100 km/h and coast for sixteen seconds.
+   */
+  brakeG: 1.05,
   driveline: 0.85,
 };

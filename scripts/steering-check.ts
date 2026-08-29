@@ -10,6 +10,7 @@
 
 const { createCarState, stepCar } = await import("../src/game/vehicle");
 const { buildWorld } = await import("../src/game/world");
+const { GEARBOX } = await import("../src/engine/engines");
 
 const world = buildWorld("airfield", 1);
 const WHEELBASE = 2.64;
@@ -219,6 +220,51 @@ const check = (name: string, ok: boolean) => {
   console.log(`the same 3 s on the runway`);
   console.log(`  off track: ${car.offTrack}, speed now ${(scrubbed * 3.6).toFixed(0)} km/h`);
   check("the black stuff costs nothing", !car.offTrack && scrubbed > 59);
+}
+
+// ---- 10. the same penalty on the circuit, where races are actually held ---
+{
+  const circuit = buildWorld("circuit", 3);
+  const line = circuit.race!.line;
+  const a = line[20];
+  const b = line[21];
+  const len = Math.hypot(b.x - a.x, b.z - a.z) || 1;
+  // 25 m off the centreline, pointing along the track
+  const car = createCarState({
+    x: a.x + (-(b.z - a.z) / len) * 25,
+    z: a.z + ((b.x - a.x) / len) * 25,
+    heading: Math.atan2(b.x - a.x, -(b.z - a.z)),
+  });
+  car.speed = 55;
+  let scrubbed = 55;
+  for (let t = 0; t < 3; t += DT) {
+    scrubbed = stepCar(car, {
+      dt: DT,
+      input: { steer: 0, throttle: 1, brake: 0 },
+      world: circuit,
+      engineSpeed: scrubbed,
+      wheelbaseM: WHEELBASE,
+      halfW: 0.92,
+      halfL: HALF_L,
+      coasting: false,
+    });
+  }
+  console.log(`3 s in the infield at 198 km/h, throttle pinned`);
+  console.log(`  off track: ${car.offTrack}, speed now ${(scrubbed * 3.6).toFixed(0)} km/h`);
+  check("the circuit punishes cutting too", car.offTrack && scrubbed * 3.6 < 50);
+}
+
+// ---- 11. the brakes actually stop the car -------------------------------
+// Drive mode used to add a flat 2500 N, which on 1420 kg is 1.8 m/s²: you
+// could stand on the pedal from 100 km/h and still be rolling sixteen seconds
+// later. This pins the deceleration to something a road car does.
+{
+  const v = 100 / 3.6;
+  const decel = 9.81 * GEARBOX.brakeG;
+  const metres = (v * v) / (2 * decel);
+  console.log(`full brake from 100 km/h`);
+  console.log(`  ${decel.toFixed(1)} m/s², stops in ${metres.toFixed(1)} m`);
+  check("stops in a road car's distance", metres > 32 && metres < 48);
 }
 
 const failed = results.filter(([, ok]) => !ok);

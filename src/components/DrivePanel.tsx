@@ -6,6 +6,7 @@ import { engine, useEngineSnapshot } from "../engine/store";
 import type { Maps } from "../engine/defaults";
 import { engineSound } from "../engine/sound";
 import { useTuneStore } from "../store/tuneStore";
+import { useMediaQuery } from "../lib/useMediaQuery";
 import { SCENES, type SceneId } from "../game/world";
 import { computeShiftRpm } from "../engine/race";
 import { runDyno } from "../engine/dyno";
@@ -295,8 +296,10 @@ export default function DrivePanel({
     const held = new Set<string>();
     const apply = () => {
       const has = (...k: string[]) => k.some((x) => held.has(x));
-      input.current.throttle = has("w", "arrowup", " ") ? 1 : 0;
-      input.current.brake = has("s", "arrowdown") ? 1 : 0;
+      input.current.throttle = has("w", "arrowup") ? 1 : 0;
+      // space is the brake here, not the throttle it is on the dyno — you
+      // have a whole hand on WASD and the other thumb wants the big pedal
+      input.current.brake = has("s", "arrowdown", " ") ? 1 : 0;
       input.current.steer =
         (has("d", "arrowright") ? 1 : 0) - (has("a", "arrowleft") ? 1 : 0);
     };
@@ -361,6 +364,12 @@ export default function DrivePanel({
     engine.setIgnition(true);
     if (s.gear < 0) engine.setGear(0);
   };
+
+  // a finger, not a mouse — phones and tablets get the on-screen controls,
+  // and the toggle lets a hybrid laptop ask for them either way
+  const coarse = useMediaQuery("(pointer: coarse), (max-width: 1023px)");
+  const [touchPref, setTouchPref] = useState<boolean | null>(null);
+  const touch = touchPref ?? coarse;
 
   const gear = hud.reversing ? "R" : s.gear < 0 ? "N" : String(s.gear + 1);
   const rpm01 = Math.min(1, s.rpm / spec.revLimit);
@@ -522,6 +531,17 @@ export default function DrivePanel({
             ))}
           </div>
           <button
+            onClick={() => setTouchPref(!touch)}
+            title={touch ? "Hide the on-screen controls" : "Show the on-screen controls"}
+            className={`rounded border px-2 py-1.5 text-[11px] backdrop-blur ${
+              touch
+                ? "border-s1/60 bg-s1/15 text-s1"
+                : "border-grid bg-surface/85 text-ink2 hover:text-ink"
+            }`}
+          >
+            🕹
+          </button>
+          <button
             onClick={() => setMuted(!muted)}
             title="Engine sound"
             className="rounded border border-grid bg-surface/85 px-2 py-1.5 text-[11px] text-ink2 backdrop-blur hover:text-ink"
@@ -551,8 +571,13 @@ export default function DrivePanel({
         {hud.error && <span className="text-serious"> · {hud.error}</span>}
       </div>
 
-      {/* HUD */}
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end justify-between gap-2 p-2">
+      {/* HUD — bottom-left normally; on a touch screen it moves up out of the
+          way so both thumbs own the bottom corners */}
+      <div
+        className={`pointer-events-none absolute p-2 ${
+          touch ? "left-0 top-14" : "inset-x-0 bottom-0 flex items-end justify-between gap-2"
+        }`}
+      >
         <div className="rounded border border-grid bg-surface/85 px-3 py-2 backdrop-blur">
           <div className="flex items-baseline gap-2">
             <span className="tabular text-3xl font-bold leading-none text-ink">
@@ -589,22 +614,34 @@ export default function DrivePanel({
           </div>
         </div>
 
-        {/* pedals + slip, and the touch pad on phones */}
-        <div className="flex items-end gap-2">
-          <div className="hidden rounded border border-grid bg-surface/85 p-2 backdrop-blur sm:block">
+        {!touch && (
+          <div className="rounded border border-grid bg-surface/85 p-2 backdrop-blur">
             <Bar label="THR" v={s.throttle} color="bg-s2" />
             <Bar label="BRK" v={s.brake} color="bg-crit" />
             <Bar label="SLIP" v={hud.slip} color="bg-s3" />
           </div>
-          <TouchPad
-            input={input}
-            onShift={(d) => {
-              setAutoShift(false);
-              engine.shift(d);
-            }}
-          />
-        </div>
+        )}
       </div>
+
+      {/* thumbs: steering stick bottom-left, pedals bottom-right */}
+      {touch && (
+        <>
+          <div className="absolute bottom-5 left-5">
+            <ThumbStick onSteer={(v) => (input.current.steer = v)} />
+          </div>
+          <div className="absolute bottom-5 right-5">
+            <Pedals
+              input={input}
+              manual={!autoShift}
+              onShift={(d) => {
+                setAutoShift(false);
+                engine.shift(d);
+              }}
+              onReset={() => setResetToken((t) => t + 1)}
+            />
+          </div>
+        </>
+      )}
 
       {/* off the track — the speed is already bleeding away, say why */}
       <AnimatePresence>
@@ -756,7 +793,7 @@ export default function DrivePanel({
                 START ENGINE
               </button>
               <p className="mt-2 max-w-xs text-[11px] leading-relaxed text-muted">
-                W / S to drive and brake, A / D to steer. The box is on{" "}
+                W to go, S or Space to brake, A / D to steer. The box is on{" "}
                 {autoShift ? "AUTO" : "MANUAL"} — Q and E to change gear
                 yourself. Hold S at a standstill for reverse.
               </p>
@@ -776,8 +813,8 @@ export default function DrivePanel({
             <div className="mb-1.5 text-xs font-bold text-ink">Controls</div>
             <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
               {[
-                ["W / ↑ / Space", "throttle"],
-                ["S / ↓", "brake, then reverse"],
+                ["W / ↑", "throttle"],
+                ["S / ↓ / Space", "brake, then reverse"],
                 ["A / D / ← →", "steer"],
                 ["Q / E", "shift down / up"],
                 ["1–6, 0", "select a gear, 0 = neutral"],
@@ -864,14 +901,89 @@ function Bar({ label, v, color }: { label: string; v: number; color: string }) {
   );
 }
 
-/** thumb controls — steering on the left, pedals on the right */
-function TouchPad({
+/**
+ * The steering thumbstick.
+ *
+ * Analog, which is the whole point: a pair of left/right buttons can only ask
+ * for full lock, and full lock is almost never what you want. How far the
+ * thumb has travelled across the base is how much steering you get.
+ *
+ * The knob is moved by writing the transform straight onto the node — running
+ * it through React state would re-render the whole panel sixty times a second
+ * for something only the canvas cares about.
+ */
+const STICK_R = 46; // px of travel from the centre to full lock
+
+function ThumbStick({ onSteer }: { onSteer: (v: number) => void }) {
+  const base = useRef<HTMLDivElement>(null);
+  const knob = useRef<HTMLDivElement>(null);
+  const pointer = useRef<number | null>(null);
+  const centreX = useRef(0);
+
+  const place = (dx: number) => {
+    const c = Math.max(-STICK_R, Math.min(STICK_R, dx));
+    if (knob.current) knob.current.style.transform = `translate3d(${c}px,0,0)`;
+    onSteer(c / STICK_R);
+  };
+
+  const down = (e: React.PointerEvent) => {
+    if (pointer.current !== null) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    pointer.current = e.pointerId;
+    const r = base.current!.getBoundingClientRect();
+    centreX.current = r.left + r.width / 2;
+    place(e.clientX - centreX.current);
+  };
+  const move = (e: React.PointerEvent) => {
+    if (pointer.current !== e.pointerId) return;
+    place(e.clientX - centreX.current);
+  };
+  const release = (e: React.PointerEvent) => {
+    if (pointer.current !== e.pointerId) return;
+    pointer.current = null;
+    place(0);
+  };
+
+  // let go of the wheel if the component ever goes away mid-corner
+  useEffect(() => () => onSteer(0), [onSteer]);
+
+  return (
+    <div
+      ref={base}
+      onPointerDown={down}
+      onPointerMove={move}
+      onPointerUp={release}
+      onPointerCancel={release}
+      onContextMenu={(e) => e.preventDefault()}
+      // touch-action none, or the browser steals the drag to scroll the page
+      className="relative grid h-32 w-32 touch-none select-none place-items-center rounded-full border border-grid bg-surface/70 backdrop-blur"
+    >
+      <div className="pointer-events-none absolute inset-x-3 flex justify-between text-xs text-muted">
+        <span>◀</span>
+        <span>▶</span>
+      </div>
+      <div
+        ref={knob}
+        className="pointer-events-none h-14 w-14 rounded-full border border-s1/70 bg-s1/25 shadow-lg backdrop-blur"
+      />
+    </div>
+  );
+}
+
+/** the other thumb: throttle, brake, and the gears when you want them */
+function Pedals({
   input,
+  manual,
   onShift,
+  onReset,
 }: {
   input: React.RefObject<RawInput>;
+  manual: boolean;
   onShift: (d: 1 | -1) => void;
+  onReset: () => void;
 }) {
+  // held, not tapped — and pointer capture so a thumb that slides off the
+  // button still releases the pedal
   const hold = (set: (v: RawInput) => void, clear: (v: RawInput) => void) => ({
     onPointerDown: (e: React.PointerEvent) => {
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -882,36 +994,48 @@ function TouchPad({
     onContextMenu: (e: React.MouseEvent) => e.preventDefault(),
   });
 
-  const btn =
-    "flex h-12 w-12 select-none items-center justify-center rounded border border-grid bg-surface/85 text-sm font-bold text-ink2 backdrop-blur active:bg-s1/30 active:text-ink";
+  const pedal =
+    "flex h-[4.5rem] w-[4.5rem] touch-none select-none items-center justify-center rounded-full border text-sm font-bold backdrop-blur active:brightness-125";
+  const small =
+    "flex h-10 w-10 touch-none select-none items-center justify-center rounded border border-grid bg-surface/80 text-xs font-bold text-ink2 backdrop-blur active:bg-s1/30 active:text-ink";
 
   return (
-    <div className="flex items-end gap-1.5 lg:hidden">
-      <div className="flex gap-1.5">
-        <button className={btn} {...hold((i) => (i.steer = -1), (i) => (i.steer = 0))}>
-          ◀
+    <div className="flex flex-col items-end gap-2">
+      <div className="flex gap-2">
+        <button className={small} onClick={onReset} title="Back to the grid">
+          ↻
         </button>
-        <button className={btn} {...hold((i) => (i.steer = 1), (i) => (i.steer = 0))}>
-          ▶
+        <button className={small} onClick={() => onShift(-1)}>
+          ▼
+        </button>
+        <button className={small} onClick={() => onShift(1)}>
+          ▲
         </button>
       </div>
-      <div className="flex flex-col gap-1.5">
-        <div className="flex gap-1.5">
-          <button className={`${btn} h-9 w-9 text-xs`} onClick={() => onShift(-1)}>
-            ▼
-          </button>
-          <button className={`${btn} h-9 w-9 text-xs`} onClick={() => onShift(1)}>
-            ▲
-          </button>
-        </div>
-        <div className="flex gap-1.5">
-          <button className={btn} {...hold((i) => (i.brake = 1), (i) => (i.brake = 0))}>
-            BRK
-          </button>
-          <button className={btn} {...hold((i) => (i.throttle = 1), (i) => (i.throttle = 0))}>
-            GO
-          </button>
-        </div>
+      {!manual && (
+        <span className="text-[10px] uppercase tracking-wider text-muted">
+          auto — a paddle takes over
+        </span>
+      )}
+      <div className="flex items-end gap-2">
+        <button
+          className={`${pedal} border-crit/60 bg-crit/20 text-crit`}
+          {...hold(
+            (i) => (i.brake = 1),
+            (i) => (i.brake = 0),
+          )}
+        >
+          BRAKE
+        </button>
+        <button
+          className={`${pedal} h-24 w-24 border-s2/60 bg-s2/20 text-base text-s2`}
+          {...hold(
+            (i) => (i.throttle = 1),
+            (i) => (i.throttle = 0),
+          )}
+        >
+          GO
+        </button>
       </div>
     </div>
   );
