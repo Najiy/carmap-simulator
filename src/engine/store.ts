@@ -186,6 +186,27 @@ class EngineSim {
       this.holdRpm = false;
     }
   }
+  /**
+   * Scrub road speed from outside the powertrain — the driving scene owns
+   * collisions, and a wall has to be able to take the speed off the car.
+   * The revs follow the wheels, exactly as they would through a clutch.
+   */
+  setRoadSpeed(ms: number) {
+    if (this.mode !== "drive") return;
+    this.speedMs = Math.max(0, ms);
+    if (this.gear >= 0) {
+      const ratio = GEARBOX.ratios[this.gear] * GEARBOX.final;
+      const rpmWheels = (this.speedMs / GEARBOX.wheelRadiusM) * ratio * 9.549;
+      this.rpm = this.ignition
+        ? Math.max(rpmWheels, this.spec.idle * 0.9)
+        : rpmWheels;
+    }
+  }
+
+  get roadSpeedMs() {
+    return this.speedMs;
+  }
+
   shift(dir: 1 | -1) {
     if (this.mode !== "drive") return;
     // -1 is neutral — one click below first

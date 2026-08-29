@@ -40,6 +40,11 @@ export interface LiveState {
   gear: number;
   blown: boolean;
   finished: boolean;
+  /** track races only: world pose, so rivals can be drawn where they are */
+  x?: number;
+  z?: number;
+  h?: number;
+  lap?: number;
 }
 
 export interface RaceResult {
@@ -52,11 +57,12 @@ export interface RaceResult {
 }
 
 export type RoomStatus = "lobby" | "racing";
-export type RoomMode = "drag" | "sprint";
+/** "track" is the 3D driving game; the other two are the drag strip panel */
+export type RoomMode = "drag" | "sprint" | "track";
 
 /** old clients wrote "circuit" — same thing, read it as sprint */
 const parseMode = (v: unknown): RoomMode =>
-  v === "sprint" || v === "circuit" ? "sprint" : "drag";
+  v === "track" ? "track" : v === "sprint" || v === "circuit" ? "sprint" : "drag";
 
 export const MAX_PLAYERS = 8;
 
@@ -69,6 +75,8 @@ export interface RoomSnapshot {
   /** shared seed so every client builds the identical random circuit */
   circuitSeed: number | null;
   laps: number;
+  /** track races only: which generated scene everyone is driving */
+  scene: string | null;
   /** server-clock ms of the green light (set when the host launches) */
   greenAt: number | null;
   players: Record<string, RoomPlayer>;
@@ -109,6 +117,10 @@ export interface LobbyEntry {
   createdAt: number;
 }
 
+/** a room's mode decides which panel can race it — never mix the two */
+export const modeLabel = (m: RoomMode) =>
+  m === "track" ? "Track race" : m === "sprint" ? "Sprint" : "Drag ¼ mile";
+
 export function friendlyDbError(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);
   if (/permission|denied/i.test(msg)) {
@@ -148,7 +160,7 @@ export class RaceRoom {
 
   static async host(
     me: RoomPlayer,
-    opts: { pass?: string; mode?: RoomMode } = {},
+    opts: { pass?: string; mode?: RoomMode; scene?: string } = {},
     id = defaultId(),
   ): Promise<RaceRoom> {
     const db = getDatabase(app);
@@ -168,6 +180,7 @@ export class RaceRoom {
       mode: opts.mode ?? "drag",
       circuitSeed: null,
       laps: 2,
+      scene: opts.scene ?? null,
       greenAt: null,
       passHash: pass ? await hashPass(code, pass) : null,
       players: { [id]: me },
@@ -196,6 +209,8 @@ export class RaceRoom {
     me: RoomPlayer,
     pass = "",
     id = defaultId(),
+    /** which games this panel can actually race — everything, if omitted */
+    allow?: RoomMode[],
   ): Promise<RaceRoom> {
     const code = codeRaw.trim().toUpperCase();
     const db = getDatabase(app);
@@ -209,6 +224,16 @@ export class RaceRoom {
     }
     if (typeof val.createdAt === "number" && Date.now() - val.createdAt > 2 * 3600_000) {
       throw new Error("That race code has expired.");
+    }
+    // a drag room and a track room are different games; joining the wrong
+    // one would silently put you on a strip nobody else is driving
+    const theirMode = parseMode(val.mode);
+    if (allow && !allow.includes(theirMode)) {
+      throw new Error(
+        `${code} is a ${modeLabel(theirMode).toLowerCase()} room — join it from the ${
+          theirMode === "track" ? "Drive" : "Race"
+        } tab.`,
+      );
     }
     if (val.passHash) {
       const attempt = pass.trim()
@@ -250,6 +275,7 @@ export class RaceRoom {
         mode: parseMode(v.mode),
         circuitSeed: typeof v.circuitSeed === "number" ? v.circuitSeed : null,
         laps: typeof v.laps === "number" ? v.laps : 2,
+        scene: typeof v.scene === "string" ? v.scene : null,
         greenAt: typeof v.greenAt === "number" ? v.greenAt : null,
         players: v.players ?? {},
         live: v.live ?? {},
@@ -282,8 +308,14 @@ export class RaceRoom {
     });
   }
 
-  /** live list of open races for the browser — returns an unsubscribe */
-  static watchLobby(cb: (list: LobbyEntry[]) => void): () => void {
+  /**
+   * Live list of open races for the browser — returns an unsubscribe.
+   * `modes` filters to the games this panel can actually race.
+   */
+  static watchLobby(
+    cb: (list: LobbyEntry[]) => void,
+    modes?: RoomMode[],
+  ): () => void {
     const db = getDatabase(app);
     return onValue(
       ref(db, "lobby"),
@@ -306,6 +338,7 @@ export class RaceRoom {
             createdAt: e.createdAt ?? 0,
           }))
           .filter((e) => now - e.createdAt < 2 * 3600_000)
+          .filter((e) => !modes || modes.includes(e.mode))
           .sort((a, b) => b.createdAt - a.createdAt);
         cb(list);
       },
@@ -359,10 +392,11 @@ export class RaceRoom {
     });
   }
 
-  /** host only: flip the room between drag and circuit while in the lobby */
-  async setMode(mode: RoomMode): Promise<void> {
+  /** host only: change what the room is racing while in the lobby */
+  async setMode(mode: RoomMode, scene?: string): Promise<void> {
     if (!this.isHost) return;
     const updates: Record<string, unknown> = { mode };
+    if (scene !== undefined) updates.scene = scene;
     // a mode change is a new contract — everyone re-readies
     for (const id of Object.keys(this.snapshot?.players ?? {})) {
       updates[`players/${id}/ready`] = false;
@@ -373,17 +407,19 @@ export class RaceRoom {
   /** host only: schedule the green light a few seconds out on the server clock */
   async launch(
     leadInMs = 4500,
-    opts: { circuitSeed?: number; laps?: number } = {},
+    opts: { circuitSeed?: number; laps?: number; scene?: string } = {},
   ): Promise<void> {
     if (!this.isHost) return;
-    await update(this.roomRef, {
+    const patch: Record<string, unknown> = {
       status: "racing",
       greenAt: this.serverNow() + leadInMs,
       circuitSeed: opts.circuitSeed ?? null,
       laps: opts.laps ?? 2,
       live: null,
       results: null,
-    });
+    };
+    if (opts.scene !== undefined) patch.scene = opts.scene;
+    await update(this.roomRef, patch);
   }
 
   /** throttled to ~10 Hz; called from the race loop */

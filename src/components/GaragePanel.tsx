@@ -182,7 +182,11 @@ function CarDetail({
           }
         >
           {/* CarViewer is position:relative itself — size it, don't place it */}
-          <CarViewer model={car.model} className="h-full w-full" />
+          <CarViewer
+            model={car.model}
+            lengthM={car.lengthM}
+            className="h-full w-full"
+          />
         </Suspense>
       ) : (
         <div className="absolute inset-0 grid place-items-center px-6 text-center">

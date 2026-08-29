@@ -18,6 +18,7 @@ import AcademyPanel from "./components/AcademyPanel";
 import DriverName from "./components/DriverName";
 import MobileDock from "./components/MobileDock";
 import GaragePanel from "./components/GaragePanel";
+import DrivePanel from "./components/DrivePanel";
 import { useGameStore } from "./store/gameStore";
 import { useMediaQuery } from "./lib/useMediaQuery";
 import type { Exercise } from "./engine/exercises";
@@ -29,9 +30,10 @@ type Tab =
   | "afr"
   | "dyno"
   | "race"
+  | "drive"
   | "learn"
   | "guide";
-type Section = "garage" | "tune" | "race" | "learn";
+type Section = "garage" | "tune" | "race" | "drive" | "learn";
 
 const SECTIONS: {
   id: Section;
@@ -59,6 +61,11 @@ const SECTIONS: {
     tabs: [{ id: "race", label: "Drag Strip" }],
   },
   {
+    id: "drive",
+    label: "Drive",
+    tabs: [{ id: "drive", label: "Free Drive" }],
+  },
+  {
     id: "learn",
     label: "Learn",
     tabs: [
@@ -71,12 +78,20 @@ const SECTIONS: {
 const sectionOf = (t: Tab): Section =>
   SECTIONS.find((s) => s.tabs.some((x) => x.id === t))!.id;
 
-/** invite links: ?join=drag-XKR42 lands the guest straight in the lobby */
-const pendingJoinCode = (() => {
+/**
+ * Invite links: ?join=drag-XKR42 opens the strip, ?join=track-XKR42 opens the
+ * driving game. The prefix matters — the two are different races on the same
+ * room codes, and landing in the wrong one just fails to join.
+ */
+const pendingJoin = (() => {
   const raw = new URLSearchParams(window.location.search).get("join");
-  const m = raw?.match(/^drag-([A-Za-z0-9]{4,8})$/i);
-  return m ? m[1].toUpperCase() : null;
+  const m = raw?.match(/^(drag|track)-([A-Za-z0-9]{4,8})$/i);
+  return m
+    ? { kind: m[1].toLowerCase() as "drag" | "track", code: m[2].toUpperCase() }
+    : null;
 })();
+const pendingJoinCode = pendingJoin?.kind === "drag" ? pendingJoin.code : null;
+const pendingTrackCode = pendingJoin?.kind === "track" ? pendingJoin.code : null;
 
 export default function App() {
   const engineId = useTuneStore((s) => s.engineId);
@@ -91,7 +106,9 @@ export default function App() {
     () => (validMaps(storedMaps, axes) ? storedMaps : baseMaps(spec, axes)),
     [storedMaps, spec, axes],
   );
-  const [tab, setTab] = useState<Tab>(pendingJoinCode ? "race" : "fuel");
+  const [tab, setTab] = useState<Tab>(
+    pendingJoinCode ? "race" : pendingTrackCode ? "drive" : "fuel",
+  );
   // the active top-level section falls out of the active tab; each section
   // remembers where you left it
   const section = sectionOf(tab);
@@ -100,6 +117,7 @@ export default function App() {
     garage: "garage",
     tune: "fuel",
     race: "race",
+    drive: "drive",
     learn: "learn",
   });
 
@@ -368,6 +386,15 @@ export default function App() {
                     axes={axes}
                     maps={maps}
                     autoJoinCode={pendingJoinCode}
+                  />
+                )}
+                {tab === "drive" && (
+                  <DrivePanel
+                    spec={spec}
+                    engineId={engineId}
+                    maps={maps}
+                    onGotoEngine={swapEngine}
+                    autoJoinCode={pendingTrackCode}
                   />
                 )}
                 {tab === "learn" && (

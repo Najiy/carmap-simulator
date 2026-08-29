@@ -395,7 +395,15 @@ export default function RacePanel({
       setBusy(true);
       setMpError(null);
       try {
-        const room = await RaceRoom.join(code, myMeta(), joinPass);
+        // the Drive tab hosts "track" rooms on the same code space; racing
+        // one here would put you alone on a strip nobody else is driving
+        const room = await RaceRoom.join(
+          code,
+          myMeta(),
+          joinPass,
+          undefined,
+          ["drag", "sprint"],
+        );
         attachRoom(room);
         setPhase("lobby");
       } catch (e) {
@@ -435,7 +443,7 @@ export default function RacePanel({
   // the "open races" browser is live while you're on the setup screen
   useEffect(() => {
     if (phase !== "setup") return;
-    return RaceRoom.watchLobby(setLobbyList);
+    return RaceRoom.watchLobby(setLobbyList, ["drag", "sprint"]);
   }, [phase]);
 
   // ---- the race runner -----------------------------------------------------

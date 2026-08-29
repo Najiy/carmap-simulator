@@ -47,6 +47,33 @@ opens the ones with a 3D model in a full-bleed WebGL viewer, with the specs and
 actions floating over the render. three.js is lazy-loaded, so it only reaches
 the browser when someone actually opens a car.
 
+### Free Drive and track races
+
+The **Drive** tab puts the car in a scene you can actually drive. The
+powertrain is unchanged — `engine/store.ts` still owns throttle, boost, the
+gearbox, the clutch and road speed, so the gauges, the AFR datalog, the damage
+model and the exhaust note all behave exactly as they do on the dyno. The game
+layer adds only what a scene needs: where the car is pointing
+(`game/vehicle.ts`) and what it runs into.
+
+Steering is a kinematic bicycle model integrated at the **rear axle** — a car
+pivots about its back wheels, so the nose swings wide and the tail cuts the
+corner. Past the grip limit the surplus yaw becomes slip angle instead of
+rotation, which is the tail stepping out.
+
+Scenes are generated from a seed at load time (`game/world.ts`) — nothing to
+download. Four of them: an airfield with a skidpad and a slalom, a random test
+circuit with kerbs, a grid of city blocks with solid walls, and two kilometres
+of runway.
+
+**Multiplayer** reuses the drag strip's room mechanics wholesale
+(`multiplayer/room.ts`): the same 5-letter codes, invite links, passwords,
+public browser and server-clock green light. A `mode: "track"` room races the
+generated circuit instead of the strip, and the two can't be joined by mistake.
+The room's `circuitSeed` is what makes every client build the identical track;
+each car streams its pose ten times a second and draws its rivals as smoothed
+ghosts with name tags.
+
 ### Adding a car model
 
 Models are served from `public/models` and fetched on demand — never bundled.
@@ -66,7 +93,14 @@ That lands the Focus ST at 3.3 MB. Then add a `model` entry to the car in
 `src/engine/cars.ts`. Scans usually need two more things:
 
 - `upAxis: "z"` — photogrammetry tools export Z-up and rotate nothing.
-- `crop` — a box, in the file's own coordinates, keeping the subject and
-  dropping the car park around it. `scripts/glb-density.cjs` and
-  `scripts/glb-projections.cjs` print density maps of a scan to find one.
+- `crop` / `body` — boxes, in the file's own coordinates, keeping the subject
+  and dropping the car park around it. `scripts/glb-density.cjs` and
+  `scripts/glb-projections.cjs` print density maps of a scan to find them.
+- `align` — where the car actually sits in the file: which way the nose
+  points, where the tyres touch, and how long the body measures in file units.
+  A scan has no idea it is a car, so without this it cannot be put on its
+  wheels facing a known direction at real scale.
+  `scripts/glb-heading.cjs` prints the block ready to paste — it runs a PCA on
+  the body's footprint for the long axis, then profiles roof height along it to
+  tell the bonnet from the boot.
 
