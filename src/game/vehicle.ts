@@ -35,6 +35,17 @@ export interface CarState {
   impact: number;
   /** on the grass — the HUD warns, and the physics is punishing it */
   offTrack: boolean;
+  /**
+   * How fast the contact patch is sliding across the road, m/s. This is the
+   * honest driver for everything the tyres tell you about — the squeal, the
+   * smoke, and the marks left behind — so all three agree with the physics
+   * rather than each guessing from the slip angle separately.
+   */
+  scrub: number;
+  /** lateral acceleration, g — roll, camera lean and the HUD all read it */
+  lateralG: number;
+  /** echo of the handbrake input, for the lights and the effects */
+  handbrake: number;
 }
 
 export interface DriveInput {
@@ -42,6 +53,8 @@ export interface DriveInput {
   steer: number;
   throttle: number;
   brake: number;
+  /** 0..1 — locks the rears; the reason a car park has a skidpan */
+  handbrake: number;
 }
 
 export function createCarState(spawn: World["spawn"]): CarState {
@@ -58,6 +71,9 @@ export function createCarState(spawn: World["spawn"]): CarState {
     hitCones: 0,
     impact: 0,
     offTrack: false,
+    scrub: 0,
+    lateralG: 0,
+    handbrake: 0,
   };
 }
 
@@ -77,6 +93,15 @@ const YAW_RESPONSE = 7;
 const GRASS_CAP = 12; // m/s — about 43 km/h
 const GRASS_DRAG = 2.4; // per second, toward the cap
 const GRASS_GRIP = 0.55;
+
+/**
+ * The handbrake. Locked rears do two things at once: they drag the car down
+ * (less hard than the footbrake, which has all four corners and the front
+ * weight transfer) and they take the back axle's grip away, which is the
+ * whole point — the tail comes round.
+ */
+const HANDBRAKE_G = 0.42;
+const HANDBRAKE_GRIP_LOSS = 0.72;
 
 /** front wheels stop biting long before the wheel does — speed-sensitive */
 const steerLimit = (speedMs: number) =>
@@ -114,6 +139,8 @@ export function stepCar(car: CarState, a: StepArgs): number {
     car.slip = 0;
     car.yawRate = 0;
     car.offTrack = false;
+    car.scrub = 0;
+    car.lateralG = 0;
     car.roll += (0 - car.roll) * clamp(dt * 5, 0, 1);
     car.pitch += (0 - car.pitch) * clamp(dt * 4, 0, 1);
     return 0;
@@ -150,6 +177,14 @@ export function stepCar(car: CarState, a: StepArgs): number {
     car.speed += (cap - car.speed) * clamp(dt * GRASS_DRAG, 0, 1);
   }
 
+  // handbrake: locked rears drag the car down and give up their grip
+  const hb = car.reversing ? 0 : clamp(input.handbrake, 0, 1);
+  car.handbrake = hb;
+  if (hb > 0.02 && Math.abs(car.speed) > 0.1) {
+    const decel = HANDBRAKE_G * 9.81 * hb * dt;
+    car.speed = Math.sign(car.speed) * Math.max(0, Math.abs(car.speed) - decel);
+  }
+
   const v = car.speed;
   const absV = Math.abs(v);
   const halfWb = a.wheelbaseM / 2;
@@ -169,7 +204,11 @@ export function stepCar(car: CarState, a: StepArgs): number {
   // ...and grip decides how much of it the car actually gets. Past the limit
   // the surplus becomes slip angle instead of rotation, which is the tail
   // stepping out; power-on makes it worse, as it should.
-  const grip = 9.2 * (1 + 0.35 * input.brake) * (car.offTrack ? GRASS_GRIP : 1);
+  const grip =
+    9.2 *
+    (1 + 0.35 * input.brake) *
+    (1 - HANDBRAKE_GRIP_LOSS * hb) *
+    (car.offTrack ? GRASS_GRIP : 1);
   const gripYaw = absV > 0.5 ? grip / Math.max(absV, 1) : yawWanted;
   const yawGrip = clamp(yawWanted, -gripYaw, gripYaw);
   const surplus = yawWanted - yawGrip;
@@ -177,6 +216,11 @@ export function stepCar(car: CarState, a: StepArgs): number {
   car.slip = clamp(car.slip, -0.7, 0.7);
   if (input.throttle > 0.7 && absV > 4)
     car.slip += surplus * input.throttle * 0.35 * dt;
+  // with the rears locked the back steps out whichever way it is pointed,
+  // not just when you have asked for more than the fronts can give
+  if (hb > 0.02 && absV > 2)
+    car.slip += Math.sign(input.steer || car.slip || 1) * hb * 1.1 * dt;
+  car.slip = clamp(car.slip, -0.7, 0.7);
 
   // A car has yaw inertia. It takes a beat to take a set on turn-in and
   // another to stop rotating when you unwind, and chasing the demand
@@ -196,6 +240,13 @@ export function stepCar(car: CarState, a: StepArgs): number {
   const nz = nrz - Math.cos(car.heading) * halfWb;
 
   const scrub = resolve(car, nx, nz, a);
+
+  // What the tyres are actually doing, in one number: how fast the contact
+  // patch is sliding sideways across the road. Squeal, smoke and skid marks
+  // all read this, so they can never disagree with each other or with the
+  // physics. Locked rears drag along the car's whole direction of travel.
+  car.scrub = Math.abs(Math.sin(car.slip)) * absV + hb * absV * 0.55;
+  car.lateralG = Math.abs(car.yawRate * v) / 9.81;
 
   // cosmetic weight transfer — small, but it is most of what sells the speed.
   // Roll follows lateral acceleration, which is yaw rate times road speed.

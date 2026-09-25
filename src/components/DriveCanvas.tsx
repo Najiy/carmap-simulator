@@ -7,6 +7,8 @@ import type { Car } from "../engine/cars";
 import { disposeTree, loadCarModel } from "../game/carModel";
 import { buildWorld, disposeWorld, type SceneId, type World } from "../game/world";
 import { createCarState, stepCar, type DriveInput } from "../game/vehicle";
+import { brakeLights, skyDome, TyreFx } from "../game/effects";
+import { tyreSound } from "../engine/tyreSound";
 import {
   createLapState,
   driverColor,
@@ -77,6 +79,7 @@ export interface RawInput {
   steer: number; // -1 … 1
   throttle: number; // 0 … 1
   brake: number; // 0 … 1
+  handbrake: number; // 0 … 1
 }
 
 export interface DriveHud {
@@ -192,8 +195,10 @@ export default function DriveCanvas({
 
     const world: World = buildWorld(sceneId, seed);
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(world.sky);
+    const horizon = new THREE.Color(world.sky);
+    scene.background = horizon.clone();
     scene.fog = new THREE.Fog(world.sky, 140, world.radius * 1.6);
+    scene.add(skyDome(horizon, world.radius * 2.1));
     scene.add(world.group);
 
     scene.add(new THREE.HemisphereLight(0xbcd0e8, 0x33352c, 2.4));
@@ -214,7 +219,13 @@ export default function DriveCanvas({
     const body = new THREE.Group();
     holder.add(body);
     holder.add(contactShadow(car.lengthM, car.widthM));
+    const lamps = brakeLights(car.lengthM, car.widthM);
+    body.add(lamps.object);
     scene.add(holder);
+
+    // rubber, smoke and dust — all driven off the one scrub number
+    const fx = new TyreFx();
+    fx.addTo(scene);
 
     const startRace = raceRef.current;
     const gridIndex = startRace
@@ -228,7 +239,7 @@ export default function DriveCanvas({
     const laps = createLapState();
     let raceHud: RaceHud | null = null;
     let reported = false;
-    const smooth: DriveInput = { steer: 0, throttle: 0, brake: 0 };
+    const smooth: DriveInput = { steer: 0, throttle: 0, brake: 0, handbrake: 0 };
     let half = { w: car.widthM / 2, l: car.lengthM / 2 };
     let ready = false;
     let distance = 0;
@@ -327,6 +338,9 @@ export default function DriveCanvas({
     // the chase camera eases toward where it wants to be, but it has to
     // *start* there — lerping in from the origin flies it through the car
     let camPlaced = false;
+    // camera shake: decays on its own, topped up by impacts and by everything
+    // the car is doing that ought to come up through the seat
+    let shake = 0;
     let last = performance.now();
 
     const frame = () => {
@@ -347,6 +361,8 @@ export default function DriveCanvas({
         state.reversing = false;
         camPlaced = false;
         camYaw = world.spawn.heading;
+        shake = 0;
+        fx.reset();
         engine.setRoadSpeed(0);
       }
 
@@ -358,6 +374,8 @@ export default function DriveCanvas({
       smooth.throttle = rate(smooth.throttle, raw.throttle, 9, 14);
       smooth.brake = rate(smooth.brake, raw.brake, 14, 16);
       smooth.steer = rate(smooth.steer, raw.steer, 7, 11);
+      // the handbrake is a lever, not a pedal — it comes on fast
+      smooth.handbrake = rate(smooth.handbrake, raw.handbrake, 22, 20);
 
       // ---- race: hold the field on the grid until the lights go out ----
       const rc = raceRef.current;
@@ -370,6 +388,7 @@ export default function DriveCanvas({
           // brakes on, no throttle: you can rev it, you cannot leave
           smooth.throttle = 0;
           smooth.brake = 1;
+          smooth.handbrake = 0;
           laps.currentLapStart = 0;
         } else if (!laps.finished) {
           updateLaps(laps, layout, state.x, state.z, clock, rc.laps);
@@ -485,6 +504,11 @@ export default function DriveCanvas({
       }
       distance += Math.abs(state.speed) * dt;
 
+      // rubber, smoke and squeal, all off the same scrub number
+      const squeal = fx.update(state, dt, car.wheelbaseM, car.widthM * 0.82);
+      tyreSound.update(squeal, state.scrub, state.offTrack, s.running && !frozen);
+      lamps.set(Math.min(1, smooth.brake * 0.9 + state.handbrake * 0.7));
+
       holder.position.set(state.x, 0, state.z);
       // A heading of h is a scene rotation of -h: the physics travels along
       // (sin h, -cos h) but three.js maps a model's nose (local -Z) to
@@ -565,6 +589,22 @@ export default function DriveCanvas({
       cam.fov = 62 + speed01 * 15;
       cam.updateProjectionMatrix();
 
+      // Camera shake, applied after lookAt so it moves the eye without
+      // changing the aim. Two incommensurate sines beat random jitter: noise
+      // reads as a dropped frame, whereas this reads as a car.
+      shake = Math.max(shake - dt * 2.6, state.impact);
+      const rumble =
+        speed01 * 0.1 + squeal * 0.22 + (s.limiter ? 0.28 : 0) +
+        (state.offTrack ? 0.3 : 0);
+      const amp = shake * 0.22 + rumble * 0.022;
+      if (amp > 0.0004 && camRef.current !== "orbit") {
+        const st = now * 0.001;
+        cam.position.x += (Math.sin(st * 37.1) + Math.sin(st * 23.3) * 0.7) * amp;
+        cam.position.y +=
+          (Math.sin(st * 41.7 + 1.3) + Math.sin(st * 19.9 + 0.4) * 0.7) * amp * 0.8;
+        cam.rotateZ(Math.sin(st * 17.7) * amp * 0.09);
+      }
+
       if (!ready) {
         ready = true;
         emit();
@@ -593,6 +633,9 @@ export default function DriveCanvas({
       engine.setThrottle(0);
       engine.setBrake(0.15);
       engine.setMode("dyno");
+      tyreSound.silence();
+      fx.dispose();
+      lamps.dispose();
       disposeWorld(world);
       disposeTree(holder);
       for (const g of ghosts.values()) {

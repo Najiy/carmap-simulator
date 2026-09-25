@@ -30,7 +30,7 @@ function run(steer: number, speed: number, seconds: number) {
   for (let t = 0; t < seconds; t += DT) {
     stepCar(car, {
       dt: DT,
-      input: { steer, throttle: 0.3, brake: 0 },
+      input: { steer, throttle: 0.3, brake: 0, handbrake: 0 },
       world,
       engineSpeed: speed,
       wheelbaseM: WHEELBASE,
@@ -140,7 +140,7 @@ const check = (name: string, ok: boolean) => {
   for (let i = 0; i < 120; i++) {
     stepCar(car, {
       dt: DT,
-      input: { steer: 1, throttle: 0, brake: 0 },
+      input: { steer: 1, throttle: 0, brake: 0, handbrake: 0 },
       world,
       engineSpeed: 0,
       wheelbaseM: WHEELBASE,
@@ -183,7 +183,7 @@ const check = (name: string, ok: boolean) => {
   for (let t = 0; t < 3; t += DT) {
     scrubbed = stepCar(car, {
       dt: DT,
-      input: { steer: 0, throttle: 1, brake: 0 },
+      input: { steer: 0, throttle: 1, brake: 0, handbrake: 0 },
       world: mile,
       // the powertrain keeps asking for the scrubbed speed back, exactly as
       // DriveCanvas feeds it in
@@ -208,7 +208,7 @@ const check = (name: string, ok: boolean) => {
   for (let t = 0; t < 3; t += DT) {
     scrubbed = stepCar(car, {
       dt: DT,
-      input: { steer: 0, throttle: 1, brake: 0 },
+      input: { steer: 0, throttle: 1, brake: 0, handbrake: 0 },
       world: mile,
       engineSpeed: 60,
       wheelbaseM: WHEELBASE,
@@ -240,7 +240,7 @@ const check = (name: string, ok: boolean) => {
   for (let t = 0; t < 3; t += DT) {
     scrubbed = stepCar(car, {
       dt: DT,
-      input: { steer: 0, throttle: 1, brake: 0 },
+      input: { steer: 0, throttle: 1, brake: 0, handbrake: 0 },
       world: circuit,
       engineSpeed: scrubbed,
       wheelbaseM: WHEELBASE,
@@ -265,6 +265,77 @@ const check = (name: string, ok: boolean) => {
   console.log(`full brake from 100 km/h`);
   console.log(`  ${decel.toFixed(1)} m/s², stops in ${metres.toFixed(1)} m`);
   check("stops in a road car's distance", metres > 32 && metres < 48);
+}
+
+// ---- 12. the handbrake lets the back go -----------------------------------
+// The point of the lever is not that it stops the car — the footbrake does
+// that far better — but that the rears give up while the fronts still bite.
+{
+  const drive = (handbrake: number) => {
+    const car = createCarState({ x: 0, z: 0, heading: 0 });
+    let speed = 22;
+    for (let t = 0; t < 1.6; t += DT) {
+      speed = stepCar(car, {
+        dt: DT,
+        input: { steer: 0.45, throttle: 0.2, brake: 0, handbrake },
+        world,
+        engineSpeed: speed,
+        wheelbaseM: WHEELBASE,
+        halfW: 0.92,
+        halfL: HALF_L,
+        coasting: false,
+      });
+    }
+    return car;
+  };
+  const gripped = drive(0);
+  const lever = drive(1);
+  console.log(`1.6 s at 45% lock from 79 km/h`);
+  console.log(
+    `  slip angle   ${deg(Math.abs(gripped.slip)).toFixed(1)}° gripped` +
+      ` vs ${deg(Math.abs(lever.slip)).toFixed(1)}° on the handbrake`,
+  );
+  console.log(
+    `  speed left   ${(Math.abs(gripped.speed) * 3.6).toFixed(0)} km/h` +
+      ` vs ${(Math.abs(lever.speed) * 3.6).toFixed(0)} km/h`,
+  );
+  check(
+    "the handbrake hangs the tail out",
+    Math.abs(lever.slip) > Math.abs(gripped.slip) * 2.5,
+  );
+  check(
+    "...and scrubs speed, but less than the footbrake",
+    Math.abs(lever.speed) < Math.abs(gripped.speed) &&
+      Math.abs(lever.speed) > 4,
+  );
+}
+
+// ---- 13. scrub only reports a tyre that is actually sliding ---------------
+// Squeal, smoke and skid marks all read car.scrub, so a tyre doing its job
+// has to report zero or the car hisses and smokes its way round every bend.
+{
+  const gentle = run(0.2, 9, 3).car;
+  const { car: sliding } = (() => {
+    const car = createCarState({ x: 0, z: 0, heading: 0 });
+    let speed = 30;
+    for (let t = 0; t < 1.2; t += DT) {
+      speed = stepCar(car, {
+        dt: DT,
+        input: { steer: 1, throttle: 1, brake: 0, handbrake: 0 },
+        world,
+        engineSpeed: speed,
+        wheelbaseM: WHEELBASE,
+        halfW: 0.92,
+        halfL: HALF_L,
+        coasting: false,
+      });
+    }
+    return { car };
+  })();
+  console.log(`contact-patch scrub`);
+  console.log(`  ${gentle.scrub.toFixed(2)} m/s cruising, ${sliding.scrub.toFixed(2)} m/s sideways`);
+  check("a tyre inside its envelope does not scrub", gentle.scrub < 0.5);
+  check("one past it does", sliding.scrub > 3);
 }
 
 const failed = results.filter(([, ok]) => !ok);

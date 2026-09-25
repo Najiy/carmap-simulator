@@ -289,7 +289,12 @@ export default function DrivePanel({
   );
   const borrowed = own && own.id !== car.id ? own : null;
 
-  const input = useRef<RawInput>({ steer: 0, throttle: 0, brake: 0 });
+  const input = useRef<RawInput>({
+    steer: 0,
+    throttle: 0,
+    brake: 0,
+    handbrake: 0,
+  });
 
   // held keys → analog-ish targets; DriveCanvas does the ramping
   useEffect(() => {
@@ -302,6 +307,7 @@ export default function DrivePanel({
       input.current.brake = has("s", "arrowdown", " ") ? 1 : 0;
       input.current.steer =
         (has("d", "arrowright") ? 1 : 0) - (has("a", "arrowleft") ? 1 : 0);
+      input.current.handbrake = has("shift") ? 1 : 0;
     };
     const typing = (e: KeyboardEvent) =>
       (e.target as HTMLElement)?.closest("input,textarea,select") !== null;
@@ -309,7 +315,9 @@ export default function DrivePanel({
     const down = (e: KeyboardEvent) => {
       if (typing(e)) return;
       const k = e.key.toLowerCase();
-      if (["w", "a", "s", "d", " ", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(k)) {
+      if (
+        ["w", "a", "s", "d", " ", "shift", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(k)
+      ) {
         e.preventDefault();
         held.add(k);
         apply();
@@ -793,7 +801,8 @@ export default function DrivePanel({
                 START ENGINE
               </button>
               <p className="mt-2 max-w-xs text-[11px] leading-relaxed text-muted">
-                W to go, S or Space to brake, A / D to steer. The box is on{" "}
+                W to go, S or Space to brake, A / D to steer, Shift for the
+                handbrake. The box is on{" "}
                 {autoShift ? "AUTO" : "MANUAL"} — Q and E to change gear
                 yourself. Hold S at a standstill for reverse.
               </p>
@@ -815,6 +824,7 @@ export default function DrivePanel({
               {[
                 ["W / ↑", "throttle"],
                 ["S / ↓ / Space", "brake, then reverse"],
+                ["Shift", "handbrake — locks the rears"],
                 ["A / D / ← →", "steer"],
                 ["Q / E", "shift down / up"],
                 ["1–6, 0", "select a gear, 0 = neutral"],
@@ -1012,6 +1022,16 @@ function Pedals({
           ▲
         </button>
       </div>
+      <button
+        className={`${small} h-10 w-[4.5rem] border-warn/60 bg-warn/15 text-warn`}
+        title="Handbrake — locks the rears"
+        {...hold(
+          (i) => (i.handbrake = 1),
+          (i) => (i.handbrake = 0),
+        )}
+      >
+        HAND
+      </button>
       {!manual && (
         <span className="text-[10px] uppercase tracking-wider text-muted">
           auto — a paddle takes over

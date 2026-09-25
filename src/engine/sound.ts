@@ -35,6 +35,15 @@ class EngineSound {
     return this._muted;
   }
 
+  /**
+   * The shared AudioContext, once a user gesture has opened it. The tyre
+   * noise hangs off the same one — a second context would cost another
+   * hardware stream and would not obey this mute flag.
+   */
+  get context(): AudioContext | null {
+    return this.ctx;
+  }
+
   /** Must be called from a user gesture (the START ENGINE click). */
   ensure() {
     if (this.ctx) {
