@@ -59,6 +59,9 @@ export class SkidMarks {
     const mat = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: false,
+      // the winding of each quad flips with the direction the car is
+      // travelling, so half a doughnut would be culled away
+      side: THREE.DoubleSide,
       polygonOffset: true,
       polygonOffsetFactor: -4,
       polygonOffsetUnits: -4,
