@@ -1,4 +1,6 @@
 import * as THREE from "three";
+import { dist2ToLine, type Fence } from "./trackMath";
+import { dressCircuit } from "./circuitScene";
 
 /**
  * Procedural driving scenes.
@@ -8,39 +10,9 @@ import * as THREE from "three";
  * boxes the car cannot drive through, and where to put it on the grid.
  */
 
-export type SceneId = "airfield" | "circuit" | "city" | "mile";
+import { SCENES, type SceneDef, type SceneId } from "./scenes";
 
-export interface SceneDef {
-  id: SceneId;
-  name: string;
-  blurb: string;
-}
-
-/** the scenes a multiplayer race can be held on */
-export const RACE_SCENES: SceneId[] = ["circuit", "mile"];
-
-export const SCENES: SceneDef[] = [
-  {
-    id: "airfield",
-    name: "Airfield",
-    blurb: "Open tarmac, a painted skidpad and a slalom. Nothing to hit.",
-  },
-  {
-    id: "circuit",
-    name: "Test circuit",
-    blurb: "A closed loop with kerbs and armco — somewhere to string corners together.",
-  },
-  {
-    id: "city",
-    name: "City blocks",
-    blurb: "A grid of streets and buildings. Tight, and the walls are solid.",
-  },
-  {
-    id: "mile",
-    name: "The mile",
-    blurb: "Two kilometres of runway with distance boards. For top speed.",
-  },
-];
+export { RACE_SCENES, SCENES, type SceneDef, type SceneId } from "./scenes";
 
 /** axis-aligned footprint the car collides with */
 export interface Wall {
@@ -97,6 +69,12 @@ export interface World {
    * than it gains, or a race is just a contest of who ignores the track.
    */
   onTarmac: (x: number, z: number) => boolean;
+  /** armco either side of a circuit — null where there is none */
+  fence: Fence | null;
+  /** the start gantry: how many reds are lit (0 = lights out) */
+  startLights: ((red: number) => void) | null;
+  /** fog near/far, when the scene wants something other than the default */
+  fog: [number, number] | null;
 }
 
 /** small deterministic PRNG so a seed always gives the same scene */
@@ -117,27 +95,6 @@ const TARMAC = 0x55554f;
 const LINE = 0xe8e6dc;
 const GRASS = 0x3c4a33;
 const KERB_A = 0xc4402f;
-const KERB_B = 0xe8e6dc;
-
-/** shortest distance from a point to a polyline, squared */
-function dist2ToLine(line: Vec2[], x: number, z: number, closed: boolean) {
-  let best = Infinity;
-  const n = line.length;
-  const last = closed ? n : n - 1;
-  for (let i = 0; i < last; i++) {
-    const a = line[i];
-    const b = line[(i + 1) % n];
-    const dx = b.x - a.x;
-    const dz = b.z - a.z;
-    const d2 = dx * dx + dz * dz || 1;
-    const t = Math.min(1, Math.max(0, ((x - a.x) * dx + (z - a.z) * dz) / d2));
-    const ex = x - (a.x + dx * t);
-    const ez = z - (a.z + dz * t);
-    const e = ex * ex + ez * ez;
-    if (e < best) best = e;
-  }
-  return best;
-}
 
 /** flat-shaded material, so the low-poly scenery reads as deliberate */
 const flat = (color: number) => new THREE.MeshLambertMaterial({ color });
@@ -160,6 +117,9 @@ export function buildWorld(id: SceneId, seed = 1): World {
     sky: 0x39424e,
     race: null,
     onTarmac: () => true,
+    fence: null,
+    startLights: null,
+    fog: null,
   };
 
   if (id === "airfield") buildAirfield(world, rand);
@@ -312,7 +272,6 @@ function buildAirfield(w: World, rand: () => number) {
 function buildCircuit(w: World, rand: () => number) {
   w.sky = 0x36404c;
   w.radius = 700;
-  ground(w.group, 2200, GRASS);
 
   // a closed loop from a handful of harmonics — always smooth, never a
   // circle, and different for every seed
@@ -330,58 +289,8 @@ function buildCircuit(w: World, rand: () => number) {
   const HALF = 6.5;
   const pts: THREE.Vector2[] = [];
   for (let i = 0; i < N; i++) pts.push(centre((i / N) * Math.PI * 2));
-
-  // ribbon of tarmac, plus kerbs alternating red/white on both edges
-  const road = new THREE.BufferGeometry();
-  const verts: number[] = [];
-  const idx: number[] = [];
-  const kerbs: { x: number; z: number; rot: number; alt: boolean }[] = [];
-  for (let i = 0; i < N; i++) {
-    const p = pts[i];
-    const q = pts[(i + 1) % N];
-    const dx = q.x - p.x;
-    const dy = q.y - p.y;
-    const len = Math.hypot(dx, dy) || 1;
-    const nx = -dy / len;
-    const ny = dx / len;
-    verts.push(p.x + nx * HALF, 0.01, p.y + ny * HALF);
-    verts.push(p.x - nx * HALF, 0.01, p.y - ny * HALF);
-    if (i % 3 === 0) {
-      const rot = Math.atan2(dx, dy);
-      kerbs.push({ x: p.x + nx * (HALF + 0.6), z: p.y + ny * (HALF + 0.6), rot, alt: (i / 3) % 2 === 0 });
-      kerbs.push({ x: p.x - nx * (HALF + 0.6), z: p.y - ny * (HALF + 0.6), rot, alt: (i / 3) % 2 === 0 });
-    }
-  }
-  for (let i = 0; i < N; i++) {
-    const a = i * 2;
-    const b = ((i + 1) % N) * 2;
-    idx.push(a, b, a + 1, b, b + 1, a + 1);
-  }
-  road.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
-  road.setIndex(idx);
-  road.computeVertexNormals();
-  w.group.add(new THREE.Mesh(road, flat(TARMAC)));
-
-  const kerbGeo = new THREE.BoxGeometry(1.2, 0.09, 2.4);
-  for (const c of [true, false]) {
-    const list = kerbs.filter((k) => k.alt === c);
-    const mesh = new THREE.InstancedMesh(kerbGeo, flat(c ? KERB_A : KERB_B), list.length);
-    const m = new THREE.Matrix4();
-    const e = new THREE.Euler();
-    list.forEach((k, i) => {
-      m.makeRotationFromEuler(e.set(0, k.rot, 0));
-      m.setPosition(k.x, 0.045, k.z);
-      mesh.setMatrixAt(i, m);
-    });
-    mesh.instanceMatrix.needsUpdate = true;
-    w.group.add(mesh);
-  }
-
-  // start/finish and a pit wall to give the place a reference point
   const s = pts[0];
   const s1 = pts[1];
-  paint(w.group, s.x, s.y, HALF * 2, 0.6, Math.atan2(s1.x - s.x, s1.y - s.y));
-  block(w, s.x + 14, s.y, 3, 2.2, 40, 0x6a6c62);
 
   // heading 0 faces -Z, so a course of (dx, dz) is atan2(dx, -dz)
   const heading = Math.atan2(s1.x - s.x, -(s1.y - s.y));
@@ -397,6 +306,23 @@ function buildCircuit(w: World, rand: () => number) {
     grid: gridSlots(line, 0, heading, HALF),
     lengthM: lineLength(line, true),
   };
+
+  // everything you see: tarmac, kerbs, run-off, armco, the start and the
+  // scenery beyond — built off the same analytic curve at a finer step
+  const dressed = dressCircuit(w.group, {
+    centre: (t) => {
+      const v = centre(t);
+      return { x: v.x, z: v.y };
+    },
+    line,
+    segments: N,
+    half: HALF,
+    grid: w.race.grid,
+    rand,
+  });
+  w.fence = dressed.fence;
+  w.startLights = dressed.startLights;
+  w.fog = [170, 1500];
 }
 
 function buildCity(w: World, rand: () => number) {
@@ -612,6 +538,9 @@ export function disposeWorld(w: World) {
     const m = o as THREE.Mesh;
     if (!m.isMesh) return;
     m.geometry.dispose();
-    for (const mat of [m.material].flat()) mat.dispose();
+    for (const mat of [m.material].flat()) {
+      (mat as THREE.MeshLambertMaterial).map?.dispose();
+      mat.dispose();
+    }
   });
 }

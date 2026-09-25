@@ -97,6 +97,14 @@ export interface DriveHud {
   error: string | null;
   /** multiplayer only */
   race: RaceHud | null;
+  /** a lap scene's track map, with everyone on it */
+  map: TrackMap | null;
+}
+
+export interface TrackMap {
+  line: { x: number; z: number }[];
+  me: { x: number; z: number; h: number };
+  rivals: { x: number; z: number; color: string }[];
 }
 
 export interface RaceHud {
@@ -188,7 +196,11 @@ export default function DriveCanvas({
       setErr("This browser can't open a WebGL canvas.");
       return;
     }
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // A phone has a 3x screen and a fraction of the GPU. Start it at 1.5x and
+    // let the frame loop step it down if the frame rate says so.
+    const coarse = window.matchMedia("(pointer: coarse)").matches;
+    let pixelRatio = Math.min(window.devicePixelRatio, coarse ? 1.5 : 2);
+    renderer.setPixelRatio(pixelRatio);
     renderer.setSize(el.clientWidth || 1, el.clientHeight || 1, false);
     renderer.domElement.style.cssText = "width:100%;height:100%;display:block";
     el.appendChild(renderer.domElement);
@@ -197,7 +209,8 @@ export default function DriveCanvas({
     const scene = new THREE.Scene();
     const horizon = new THREE.Color(world.sky);
     scene.background = horizon.clone();
-    scene.fog = new THREE.Fog(world.sky, 140, world.radius * 1.6);
+    const [fogNear, fogFar] = world.fog ?? [140, world.radius * 1.6];
+    scene.fog = new THREE.Fog(world.sky, fogNear, fogFar);
     scene.add(skyDome(horizon, world.radius * 2.1));
     scene.add(world.group);
 
@@ -210,7 +223,7 @@ export default function DriveCanvas({
       62,
       (el.clientWidth || 1) / (el.clientHeight || 1),
       0.2,
-      world.radius * 2.4,
+      Math.max(world.radius * 2.4, fogFar + 200),
     );
 
     // the body sits under a holder, so roll and pitch never fight the
@@ -260,7 +273,22 @@ export default function DriveCanvas({
         loadPct,
         error: loadErr,
         race: raceHud,
+        map: trackMap(),
       });
+
+    // the lap scenes get a map; rivals are wherever they last reported
+    const rivalDots: TrackMap["rivals"] = [];
+    const trackMap = (): TrackMap | null => {
+      if (world.race?.kind !== "lap") return null;
+      rivalDots.length = 0;
+      for (const [id, g] of ghosts)
+        rivalDots.push({ x: g.object.position.x, z: g.object.position.z, color: driverColor(id) });
+      return {
+        line: world.race.line,
+        me: { x: state.x, z: state.z, h: state.heading },
+        rivals: rivalDots.slice(),
+      };
+    };
 
     // a stand-in so the scene is drivable while the model downloads
     const stub = new THREE.Mesh(
@@ -342,13 +370,32 @@ export default function DriveCanvas({
     // the car is doing that ought to come up through the seat
     let shake = 0;
     let last = performance.now();
+    // frame-time budget: if a slow device can't hold ~40 fps, render fewer
+    // pixels rather than drop frames. It only ever steps down.
+    let slowFrames = 0;
+    let sampled = 0;
+    let lastImpact = 0;
 
     const frame = () => {
       if (disposed) return;
       requestAnimationFrame(frame);
       const now = performance.now();
-      const dt = Math.min(0.05, (now - last) / 1000);
+      const rawDt = (now - last) / 1000;
+      const dt = Math.min(0.05, rawDt);
       last = now;
+      if (ready && rawDt < 0.25) {
+        sampled++;
+        if (rawDt > 1 / 40) slowFrames++;
+        if (sampled >= 120) {
+          if (slowFrames > 60 && pixelRatio > 0.75) {
+            pixelRatio = Math.max(0.75, pixelRatio - 0.25);
+            renderer.setPixelRatio(pixelRatio);
+            renderer.setSize(el.clientWidth || 1, el.clientHeight || 1, false);
+          }
+          sampled = 0;
+          slowFrames = 0;
+        }
+      }
 
       if (resetRef.current !== lastReset) {
         lastReset = resetRef.current;
@@ -381,6 +428,11 @@ export default function DriveCanvas({
       const rc = raceRef.current;
       const layout = world.race;
       let frozen = false;
+      if (world.startLights) {
+        // one red a second for the last five, then lights out and away
+        const clock = rc ? (now - rc.greenAtPerf) / 1000 : 0;
+        world.startLights(clock < 0 ? clamp(Math.ceil(5 + clock), 0, 5) : 0);
+      }
       if (rc && layout) {
         const clock = (now - rc.greenAtPerf) / 1000;
         frozen = clock < 0;
@@ -504,6 +556,12 @@ export default function DriveCanvas({
       }
       distance += Math.abs(state.speed) * dt;
 
+      // a knock through the phone on a hit (Android; iOS has no vibrate)
+      if (coarse && state.impact > 0.3 && lastImpact <= 0.3) {
+        navigator.vibrate?.(Math.round(20 + state.impact * 45));
+      }
+      lastImpact = state.impact;
+
       // rubber, smoke and squeal, all off the same scrub number
       const squeal = fx.update(state, dt, car.wheelbaseM, car.widthM * 0.82);
       tyreSound.update(squeal, state.scrub, state.offTrack, s.running && !frozen);
@@ -585,8 +643,18 @@ export default function DriveCanvas({
         state.roll,
       );
 
-      // a touch of fov with speed — cheap, and it does most of the work
-      cam.fov = 62 + speed01 * 15;
+      // a touch of fov with speed — cheap, and it does most of the work.
+      // Held upright, a phone would otherwise see a slot of road; open the
+      // vertical angle until the width is about what landscape shows.
+      const baseFov = 62 + speed01 * 15;
+      cam.fov =
+        cam.aspect < 1.2
+          ? Math.min(
+              92,
+              (2 * Math.atan((Math.tan((baseFov * Math.PI) / 360) * 1.2) / cam.aspect) * 180) /
+                Math.PI,
+            )
+          : baseFov;
       cam.updateProjectionMatrix();
 
       // Camera shake, applied after lookAt so it moves the eye without

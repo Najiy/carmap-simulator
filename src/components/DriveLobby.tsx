@@ -7,7 +7,7 @@ import {
   type LobbyEntry,
   type RoomSnapshot,
 } from "../multiplayer/room";
-import { RACE_SCENES, SCENES, type SceneId } from "../game/world";
+import { RACE_SCENES, SCENES, type SceneId } from "../game/scenes";
 import { useGameStore } from "../store/gameStore";
 
 /**

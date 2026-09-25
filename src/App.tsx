@@ -21,6 +21,7 @@ import GaragePanel from "./components/GaragePanel";
 import DrivePanel from "./components/DrivePanel";
 import { useGameStore } from "./store/gameStore";
 import { useMediaQuery } from "./lib/useMediaQuery";
+import { useUiStore } from "./store/uiStore";
 import type { Exercise } from "./engine/exercises";
 
 type Tab =
@@ -224,89 +225,101 @@ export default function App() {
   );
 
   const isDesktop = useMediaQuery("(min-width: 1024px)");
+  // driving full-screen: everything but the scene steps aside
+  const immersive = useUiStore((st) => st.immersive) && tab === "drive";
 
   return (
-    <div className="flex h-dvh flex-col overflow-hidden">
+    <div
+      className={`flex h-dvh flex-col overflow-hidden ${
+        immersive
+          ? ""
+          : "pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]"
+      }`}
+    >
       <FailureOverlay />
 
       {/* header */}
-      <header className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-grid bg-surface px-2 py-2 sm:px-4">
-        <span className="text-sm font-bold tracking-wide">
-          BOB'S <span className="text-s1">REAL</span> DYNOS
-        </span>
-        <select
-          value={engineId}
-          onChange={(e) => swapEngine(e.target.value)}
-          className="max-w-[52vw] rounded border border-grid bg-raised px-2 py-1 text-xs font-semibold text-ink sm:max-w-none"
-          title={spec.desc}
-        >
-          {ENGINES.map((e) => (
-            <option key={e.id} value={e.id}>
-              {e.name}
-            </option>
-          ))}
-        </select>
-        <span className="hidden text-xs text-muted xl:inline">{spec.desc}</span>
-        <div className="ml-auto flex items-center gap-2">
-          <span className="hidden sm:block">
-            <DriverName />
+      {!immersive && (
+        <header className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-grid bg-surface px-2 py-2 sm:px-4">
+          <span className="text-sm font-bold tracking-wide">
+            BOB'S <span className="text-s1">REAL</span> DYNOS
           </span>
-          <button
-            onClick={undo}
-            className="rounded border border-grid px-2 py-1 text-xs text-ink2 hover:text-ink"
-            title="Ctrl+Z"
+          <select
+            value={engineId}
+            onChange={(e) => swapEngine(e.target.value)}
+            className="max-w-[52vw] rounded border border-grid bg-raised px-2 py-1 text-xs font-semibold text-ink sm:max-w-none"
+            title={spec.desc}
           >
-            ↩ Undo
-          </button>
-          <PresetMenu spec={spec} axes={axes} maps={maps} onLoad={change} />
-        </div>
-      </header>
+            {ENGINES.map((e) => (
+              <option key={e.id} value={e.id}>
+                {e.name}
+              </option>
+            ))}
+          </select>
+          <span className="hidden text-xs text-muted xl:inline">{spec.desc}</span>
+          <div className="ml-auto flex items-center gap-2">
+            <span className="hidden sm:block">
+              <DriverName />
+            </span>
+            <button
+              onClick={undo}
+              className="rounded border border-grid px-2 py-1 text-xs text-ink2 hover:text-ink"
+              title="Ctrl+Z"
+            >
+              ↩ Undo
+            </button>
+            <PresetMenu spec={spec} axes={axes} maps={maps} onLoad={change} />
+          </div>
+        </header>
+      )}
 
       <div className="flex min-h-0 flex-1">
         {/* main: section tabs + sub-tabs + content */}
         <main className="flex min-w-0 flex-1 flex-col">
-          <nav className="border-b border-grid bg-surface">
-            <div className="flex gap-1 overflow-x-auto px-3">
-              {SECTIONS.map((s) => (
-                <button
-                  key={s.id}
-                  onClick={() => gotoSection(s.id)}
-                  className={`relative px-4 py-2 text-sm font-bold uppercase tracking-wider transition-colors ${
-                    section === s.id ? "text-ink" : "text-muted hover:text-ink2"
-                  }`}
-                >
-                  {s.label}
-                  {section === s.id && (
-                    <motion.div
-                      layoutId="section-underline"
-                      className="absolute inset-x-1 bottom-0 h-0.5 bg-s1"
-                    />
-                  )}
-                </button>
-              ))}
-            </div>
-            {activeSection.tabs.length > 1 && (
-              <div className="flex gap-1 overflow-x-auto border-t border-grid bg-page/40 px-3">
-                {activeSection.tabs.map((t) => (
+          {!immersive && (
+            <nav className="border-b border-grid bg-surface">
+              <div className="flex gap-1 overflow-x-auto px-3">
+                {SECTIONS.map((s) => (
                   <button
-                    key={t.id}
-                    onClick={() => gotoTab(t.id)}
-                    className={`relative px-3 py-1.5 text-xs transition-colors ${
-                      tab === t.id ? "text-ink" : "text-muted hover:text-ink2"
+                    key={s.id}
+                    onClick={() => gotoSection(s.id)}
+                    className={`relative px-4 py-2 text-sm font-bold uppercase tracking-wider transition-colors ${
+                      section === s.id ? "text-ink" : "text-muted hover:text-ink2"
                     }`}
                   >
-                    {t.label}
-                    {tab === t.id && (
+                    {s.label}
+                    {section === s.id && (
                       <motion.div
-                        layoutId="tab-underline"
-                        className="absolute inset-x-1 bottom-0 h-0.5 bg-s2"
+                        layoutId="section-underline"
+                        className="absolute inset-x-1 bottom-0 h-0.5 bg-s1"
                       />
                     )}
                   </button>
                 ))}
               </div>
-            )}
-          </nav>
+              {activeSection.tabs.length > 1 && (
+                <div className="flex gap-1 overflow-x-auto border-t border-grid bg-page/40 px-3">
+                  {activeSection.tabs.map((t) => (
+                    <button
+                      key={t.id}
+                      onClick={() => gotoTab(t.id)}
+                      className={`relative px-3 py-1.5 text-xs transition-colors ${
+                        tab === t.id ? "text-ink" : "text-muted hover:text-ink2"
+                      }`}
+                    >
+                      {t.label}
+                      {tab === t.id && (
+                        <motion.div
+                          layoutId="tab-underline"
+                          className="absolute inset-x-1 bottom-0 h-0.5 bg-s2"
+                        />
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </nav>
+          )}
 
           <div className="min-h-0 flex-1">
             <AnimatePresence mode="wait">
@@ -412,7 +425,7 @@ export default function App() {
         </main>
 
         {/* desktop sidebar: gauges, controls, warnings */}
-        {isDesktop && (
+        {isDesktop && !immersive && (
           <aside className="flex w-[330px] shrink-0 flex-col overflow-y-auto border-l border-grid bg-surface">
             <Gauges spec={spec} />
             <Controls spec={spec} />
@@ -422,7 +435,7 @@ export default function App() {
       </div>
 
       {/* phone: live telemetry strip + slide-up drawer */}
-      {!isDesktop && <MobileDock spec={spec} />}
+      {!isDesktop && !immersive && <MobileDock spec={spec} />}
     </div>
   );
 }

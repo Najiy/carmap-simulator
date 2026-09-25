@@ -1,5 +1,6 @@
 import { clamp } from "../engine/axes";
 import { knockCone, type World } from "./world";
+import { fenceContact } from "./trackMath";
 
 /**
  * The bit of the car the dyno doesn't simulate.
@@ -311,8 +312,57 @@ function resolve(car: CarState, nx: number, nz: number, a: StepArgs): number {
     }
   }
 
+  // armco: a limit on how far from the centreline you can be. Unlike a
+  // building it is hit at an angle nearly every time, so the speed it takes
+  // off goes with how square-on you arrive — brush it and you keep most of
+  // your pace, T-bone it and you keep very little.
+  let into = -1;
+  const fence = a.world.fence;
+  if (fence) {
+    const c = fenceContact(fence, x, z);
+    const max = c.limit - r;
+    if (c.d > max && c.d > 1e-4) {
+      const ux = (x - c.px) / c.d;
+      const uz = (z - c.pz) / c.d;
+      x = c.px + ux * max;
+      z = c.pz + uz * max;
+      const mx = nx - car.x;
+      const mz = nz - car.z;
+      const ml = Math.hypot(mx, mz);
+      if (ml > 1e-6) {
+        const dx = mx / ml;
+        const dz = mz / ml;
+        into = clamp(dx * ux + dz * uz, 0, 1);
+        // The rail turns the car along itself. Without this a car still
+        // pointing into it pays the penalty again every frame and grinds to
+        // a halt on a scrape. Head-on there is nothing to deflect toward.
+        const deflect = clamp((0.8 - into) / 0.35, 0, 1);
+        if (deflect > 0 && car.speed > 0) {
+          const along = Math.atan2(dx - into * ux, -(dz - into * uz));
+          let d = along - Math.atan2(dx, -dz);
+          while (d > Math.PI) d -= Math.PI * 2;
+          while (d < -Math.PI) d += Math.PI * 2;
+          car.heading += d * deflect;
+        }
+      } else {
+        into = 0;
+      }
+    }
+  }
+
   car.x = x;
   car.z = z;
+
+  if (!hit && into >= 0) {
+    const before = Math.abs(car.speed);
+    car.impact = Math.max(car.impact, Math.min(1, (before * into) / 14));
+    // what you lose is the part of your speed going into the rail; a
+    // scrape along it still rubs a little off
+    car.speed *= clamp(1 - 0.85 * into ** 1.5 - a.dt * 0.9, 0, 1);
+    car.yawRate *= 1 - 0.6 * into;
+    car.slip *= 1 - 0.5 * into;
+    return Math.abs(car.speed);
+  }
 
   if (!hit) return Math.abs(car.speed);
 

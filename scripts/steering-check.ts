@@ -11,6 +11,9 @@
 const { createCarState, stepCar } = await import("../src/game/vehicle");
 const { buildWorld } = await import("../src/game/world");
 const { GEARBOX } = await import("../src/engine/engines");
+const { dist2ToLine } = await import("../src/game/trackMath");
+const dist2 = (line: { x: number; z: number }[], x: number, z: number) =>
+  dist2ToLine(line, x, z, true);
 
 const world = buildWorld("airfield", 1);
 const WHEELBASE = 2.64;
@@ -336,6 +339,71 @@ const check = (name: string, ok: boolean) => {
   console.log(`  ${gentle.scrub.toFixed(2)} m/s cruising, ${sliding.scrub.toFixed(2)} m/s sideways`);
   check("a tyre inside its envelope does not scrub", gentle.scrub < 0.5);
   check("one past it does", sliding.scrub > 3);
+}
+
+// 14. the armco: you cannot go through it, a head-on hit costs most of
+// your speed, and a glancing one costs little
+{
+  const circuit = buildWorld("circuit", 3);
+  const line = circuit.race!.line;
+  const fence = circuit.fence!;
+  const a = line[40];
+  const b = line[41];
+  const len = Math.hypot(b.x - a.x, b.z - a.z);
+  const tx = (b.x - a.x) / len;
+  const tz = (b.z - a.z) / len;
+  // left normal, and a heading that points along any (dx, dz)
+  const nx = -tz;
+  const nz = tx;
+  const headingOf = (dx: number, dz: number) => Math.atan2(dx, -dz);
+  const limit = Math.max(fence.pos[40], fence.neg[40]);
+
+  const run = (x: number, z: number, heading: number, speed0: number) => {
+    const car = createCarState({ x, z, heading });
+    let speed = speed0;
+    let worst = 0;
+    for (let t = 0; t < 1.5; t += DT) {
+      speed = stepCar(car, {
+        dt: DT,
+        input: { steer: 0, throttle: 0, brake: 0, handbrake: 0 },
+        world: circuit,
+        engineSpeed: speed,
+        wheelbaseM: WHEELBASE,
+        halfW: 0.92,
+        halfL: HALF_L,
+        coasting: false,
+      });
+      worst = Math.max(worst, Math.sqrt(dist2(line, car.x, car.z)));
+    }
+    return { speed, worst };
+  };
+
+  const square = run(a.x, a.z, headingOf(nx, nz), 30);
+  // start just off the rail, angled 10° into it
+  const off = limit - 2.4;
+  const ang = (10 * Math.PI) / 180;
+  const graze = run(
+    a.x + nx * off,
+    a.z + nz * off,
+    headingOf(tx * Math.cos(ang) + nx * Math.sin(ang), tz * Math.cos(ang) + nz * Math.sin(ang)),
+    30,
+  );
+  // the verge in front of the rail is grass, which scrubs on its own — so
+  // measure the rail against the same run that never touches it
+  const clear = run(a.x + nx * off, a.z + nz * off, headingOf(tx, tz), 30);
+  console.log(`armco at ${limit.toFixed(1)} m from the line`);
+  console.log(
+    `  head-on: furthest ${square.worst.toFixed(2)} m, ${(square.speed * 3.6).toFixed(0)} km/h left of 108`,
+  );
+  console.log(
+    `  glancing: reached ${graze.worst.toFixed(2)} m, ${(graze.speed * 3.6).toFixed(0)} km/h vs ${(clear.speed * 3.6).toFixed(0)} km/h on the same grass untouched`,
+  );
+  check("the rail holds", square.worst <= limit + 0.01 && graze.worst <= limit + 0.01);
+  check("head-on costs most of the speed", square.speed < 30 * 0.35);
+  check(
+    "a glancing blow costs little",
+    graze.worst > limit - 1.5 && graze.speed > clear.speed * 0.75,
+  );
 }
 
 const failed = results.filter(([, ok]) => !ok);
